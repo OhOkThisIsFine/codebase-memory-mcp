@@ -1306,6 +1306,7 @@ static const char skill_content[] =
     "| Cross-service edges | `query_graph` with Cypher |\n"
     "| Impact of local changes | `detect_changes()` |\n"
     "| Risk-classified trace | `trace_path(risk_labels=true)` |\n"
+    "| Diff two indexed snapshots | `compare_graphs(base_project=..., target_project=...)` |\n"
     "| Text search | `search_code` or Grep |\n"
     "\n"
     "## Exploration Workflow\n"
@@ -1358,11 +1359,11 @@ static const char skill_content[] =
     "- High fan-in: `search_graph(min_degree=10, relationship=\"CALLS\", "
     "direction=\"inbound\")`\n"
     "\n"
-    "## 15 MCP Tools\n"
+    "## 16 MCP Tools\n"
     "`index_repository`, `index_status`, `list_projects`, `delete_project`,\n"
     "`search_graph`, `search_code`, `trace_path`, `detect_changes`,\n"
     "`query_graph`, `get_graph_schema`, `get_code_snippet`, `get_architecture`,\n"
-    "`check_index_coverage`, `manage_adr`, `ingest_traces`\n"
+    "`compare_graphs`, `check_index_coverage`, `manage_adr`, `ingest_traces`\n"
     "\n"
     "## Edge Types\n"
     "CALLS, HTTP_CALLS, ASYNC_CALLS, DATA_FLOWS, IMPORTS, DEFINES, DEFINES_METHOD,\n"
@@ -12896,22 +12897,33 @@ char *cbm_cli_build_args_json(const char *tool_name, int argc, char **argv, char
         if (strcmp(arg, "--") == 0) {
             break; /* end of flag parsing */
         }
-        if (strncmp(arg, "--", CLI_PAIR_LEN) != 0) {
+        /* `--key value` and `--key=value` are the documented spellings. A bare
+         * `key=value` is the same statement without the dashes and was silently
+         * dropped before: run_cli's dispatch only entered this parser for a
+         * leading `--`, so `cli search_graph limit=100` fell through to the
+         * stdin/`{}` branch and the schema defaults applied — the #997
+         * silent-wrong-output failure one spelling over. Accept it here so the
+         * one entry point owns every accepted form; a dashless token that is
+         * NOT a pair still errors loudly below. */
+        bool dashed = strncmp(arg, "--", CLI_PAIR_LEN) == 0;
+        const char *body = dashed ? arg + CLI_PAIR_LEN : arg;
+        if (!dashed && !strchr(body, '=')) {
             if (err_out) {
-                *err_out = cli_heap_msgf("unexpected argument '%s' (expected --flag value)", arg);
+                *err_out = cli_heap_msgf("unexpected argument '%s' (expected --flag value or "
+                                         "key=value)",
+                                         arg);
             }
             ok = false;
             break;
         }
-
-        const char *body = arg + CLI_PAIR_LEN; /* skip leading "--" */
         const char *eq = strchr(body, '=');
         char key[CLI_BUF_256];
         const char *value = NULL;
         bool have_value = false;
 
         if (eq) {
-            /* --key=value : split on the FIRST '='; value may contain '='/spaces. */
+            /* key=value / --key=value : split on the FIRST '='; value may contain
+             * '='/spaces. */
             size_t klen = (size_t)(eq - body);
             if (klen >= sizeof(key)) {
                 klen = sizeof(key) - CLI_SKIP_ONE;

@@ -1632,16 +1632,40 @@ char *cbm_hook_augment_process_for(cbm_mcp_server_t *srv, const char *input_json
     return ha_process(srv, input_json, forced_event, dialect);
 }
 
-/* TRUE iff `input` is an un-forced PreToolUse Bash event whose command can
- * never produce augmentation output: not a recognised search, or no queryable
- * token. Pure string work — safe to run BEFORE executable-identity hashing,
- * cohort admission, or any daemon contact, which is the point: agents issue
- * far more Bash calls than Grep/Glob and nearly all are not searches, while
- * the identity hash alone costs ~1.1 s of user CPU per invocation on a
- * production binary (measured 2026-08-28). Uses the exact parser pair
+/* TRUE iff `input` is an un-forced Claude Code tool event whose payload can
+ * never produce augmentation output: a PreToolUse Grep/Glob/Bash whose pattern
+ * carries no queryable symbol token (a no-content hook — this is the measured
+ * 0-bytes-at-1.0-1.4 s Glob case), or a tool/event pair the augmenter does not
+ * support at all. Pure string work — safe to run BEFORE executable-identity
+ * hashing, cohort admission, or any daemon contact, which is the point: agents
+ * issue far more Bash/Grep/Glob calls than searches, and nearly all carry no
+ * token, while the identity hash alone costs ~1.1 s of user CPU per invocation
+ * on a production binary (measured 2026-08-28). Uses the exact parser pair
  * ha_process uses, so the gate and the augmenter cannot disagree about what
- * counts as a search. Anything uncertain returns false and pays full fare:
- * lifecycle events, other tools, coverage adapters, oversized stdin. */
+ * counts as a no-op.
+ *
+ * The precedence mirrors ha_process exactly, because a gate that contradicts
+ * the augmenter either drops output the augmenter would have produced or pays
+ * full fare for one that returns NULL:
+ *   1. lifecycle events (SessionStart/SubagentStart/...) — ha_process formats
+ *      them from a routing context and never consults the tool/event table, so
+ *      they are NEVER gated here, even when the payload also carries a
+ *      tool_name;
+ *   2. the tool/event table — anything it rejects (e.g. PostToolUse Bash) is a
+ *      no-op ha_process would also answer with NULL;
+ *   3. the tokeniser — only the PreToolUse search adapters, whose output needs
+ *      a queryable token to exist at all.
+ * The gate runs before the dialect is known (both callers hold a payload, not
+ * a `--dialect`), so branch 2 may only fire when the payload is a no-op for
+ * EVERY dialect. A pair the Claude Code table rejects is still a live coverage
+ * adapter elsewhere — Gemini AfterTool/read_file, Qwen PostToolUse/ReadFile,
+ * Augment PostToolUse/view — and gating those drops output ha_process would
+ * have produced.
+ * PostToolUse Read is deliberately NOT gated: it is the coverage adapter, and
+ * whether it has anything to say depends on the graph. Its 0-byte cost is
+ * answered by not installing the entry, not by guessing from the payload.
+ * Anything uncertain returns false and pays full fare: coverage adapters,
+ * forced events, malformed or oversized stdin. */
 bool cbm_hook_augment_input_is_noop_bash(const char *input) {
     if (!input || strlen(input) > HA_STDIN_CAP) {
         return false;
@@ -1652,15 +1676,36 @@ bool cbm_hook_augment_input_is_noop_bash(const char *input) {
     }
     bool noop = false;
     yyjson_val *root = yyjson_doc_get_root(doc);
-    const char *event = ha_hook_event_name(root);
-    const char *tool = ha_obj_str(root, "tool_name");
-    if (event && tool && strcmp(event, "PreToolUse") == 0 && strcmp(tool, "Bash") == 0) {
-        yyjson_val *tin = yyjson_obj_get(root, "tool_input");
-        const char *cmd = ha_obj_str(tin, "command");
-        char pat[HA_BASH_TOK_SZ];
-        char tok[HA_MAX_TOKEN + 1];
-        noop = !ha_parse_bash_search_pattern(cmd, pat, sizeof(pat)) ||
-               !ha_extract_token(pat, tok, sizeof(tok));
+    if (root && yyjson_is_obj(root)) {
+        const char *event = ha_hook_event_name(root);
+        const char *tool = ha_obj_str(root, "tool_name");
+        bool coverage = false;
+        if (ha_dialect_event_supported(HA_DIALECT_EVENT, event)) {
+            /* Lifecycle: carries its own routing context. Never a no-op. */
+            noop = false;
+        } else if (event && tool && !ha_dialect_event_supported(HA_DIALECT_QWEN, event) &&
+                   !ha_tool_event_supported(HA_DIALECT_EVENT, event, tool, &coverage) &&
+                   !ha_tool_event_supported(HA_DIALECT_QWEN, event, tool, NULL) &&
+                   !ha_tool_event_supported(HA_DIALECT_GEMINI, event, tool, NULL) &&
+                   !ha_tool_event_supported(HA_DIALECT_AUGMENT, event, tool, NULL)) {
+            /* Not a pair ANY dialect handles: ha_process returns NULL without
+             * opening the graph, so skip the identity hash and the IPC too. The
+             * dialect is not in the payload, so only the intersection may be
+             * gated; a pair some dialect still supports pays full fare. */
+            noop = true;
+        } else if (event && tool && !coverage && strcmp(event, "PreToolUse") == 0) {
+            yyjson_val *tin = yyjson_obj_get(root, "tool_input");
+            char pat[HA_BASH_TOK_SZ];
+            char tok[HA_MAX_TOKEN + 1];
+            if (strcmp(tool, "Bash") == 0) {
+                const char *cmd = ha_obj_str(tin, "command");
+                noop = !ha_parse_bash_search_pattern(cmd, pat, sizeof(pat)) ||
+                       !ha_extract_token(pat, tok, sizeof(tok));
+            } else if (strcmp(tool, "Grep") == 0 || strcmp(tool, "Glob") == 0) {
+                const char *pattern = ha_obj_str(tin, "pattern");
+                noop = !ha_extract_token(pattern, tok, sizeof(tok));
+            }
+        }
     }
     yyjson_doc_free(doc);
     return noop;

@@ -665,6 +665,26 @@ static bool cli_first_nonspace_is_brace(const char *s) {
     return *s == '{';
 }
 
+/* True when the first tool argument is flag-shaped: a `--flag`, or a bare
+ * `key=value` pair — the dashless spelling cbm_cli_build_args_json also
+ * accepts. run_cli uses this to choose the flag parser over the stdin/`{}`
+ * fallback; letting a `key=value` token fall through there is what silently
+ * dropped `cli search_graph limit=100` and applied the schema defaults. Raw
+ * JSON stays on its own back-compat branch, so it is not flag-shaped here. */
+static bool cli_first_nonspace_is_arg_token(const char *s) {
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
+        s++;
+    }
+    if (strncmp(s, "--", 2) == 0) {
+        return true;
+    }
+    if (*s == '{') {
+        return false;
+    }
+    const char *eq = strchr(s, '=');
+    return eq != NULL && eq != s;
+}
+
 static char *main_local_cli_daemon_execute(const char *tool_name, const char *args_json);
 
 static int run_cli(int argc, char **argv, cbm_project_lock_manager_t *project_locks,
@@ -752,8 +772,8 @@ static int run_cli(int argc, char **argv, cbm_project_lock_manager_t *project_lo
                       "%s --help'), --args-file <path>, or piped stdin.\n",
                       tool_name, tool_name);
         args_json = rem_argv[0];
-    } else if (rem_argc >= SKIP_ONE && strncmp(rem_argv[0], "--", 2) == 0) {
-        /* flag form: cli <tool> --flag value --bare-bool ... */
+    } else if (rem_argc >= SKIP_ONE && cli_first_nonspace_is_arg_token(rem_argv[0])) {
+        /* flag form: cli <tool> --flag value --bare-bool ... or key=value pairs */
         char *err = NULL;
         heap_args = cbm_cli_build_args_json(tool_name, rem_argc, rem_argv, &err);
         if (!heap_args) {

@@ -2393,11 +2393,41 @@ TEST(cli_skill_files_content) {
     /* Reference capabilities */
     ASSERT(strstr(sk[0].content, "query_graph") != NULL);
     ASSERT(strstr(sk[0].content, "Cypher") != NULL);
-    ASSERT(strstr(sk[0].content, "15 MCP Tools") != NULL);
+    /* The count is derived from the registry in cli_skill_lists_every_mcp_tool;
+     * this line only pins that the section heading exists. */
+    ASSERT(strstr(sk[0].content, "MCP Tools") != NULL);
 
     /* Gotchas section */
     ASSERT(strstr(sk[0].content, "Gotchas") != NULL);
 
+    PASS();
+}
+
+/* The skill is the agent-facing index of the MCP surface, and it had drifted:
+ * it advertised "15 MCP Tools" and omitted `compare_graphs`, which the server
+ * registers in TOOLS. A skill that under-reports the surface teaches agents
+ * that a tool does not exist. Derive the count and the membership from the
+ * registry so the next tool cannot ship undocumented. */
+TEST(cli_skill_lists_every_mcp_tool) {
+    const cbm_skill_t *sk = cbm_get_skills();
+    ASSERT_EQ(CBM_SKILL_COUNT, 1);
+    ASSERT(strstr(sk[0].content, "compare_graphs") != NULL);
+
+    int tools = cbm_mcp_tool_count();
+    ASSERT_GT(tools, 0);
+    char header[64];
+    snprintf(header, sizeof(header), "## %d MCP Tools", tools);
+    ASSERT(strstr(sk[0].content, header) != NULL);
+
+    for (int i = 0; i < tools; i++) {
+        const char *name = cbm_mcp_tool_name(i);
+        ASSERT_NOT_NULL(name);
+        if (!strstr(sk[0].content, name)) {
+            printf("  %sFAIL%s skill omits registered MCP tool '%s'\n", tf_red(), tf_reset(),
+                   name);
+            FAIL("skill tool list does not cover the MCP registry");
+        }
+    }
     PASS();
 }
 
@@ -10190,6 +10220,68 @@ TEST(cli_hook_augment_bash_pretooluse_reaches_augmenter) {
     PASS();
 }
 
+/* A hook that has nothing to say must be recognised BEFORE executable-identity
+ * hashing / cohort admission / daemon contact: that is the 1.0-1.4 s + 0 bytes
+ * per call the backlog measured on PreToolUse Glob and PostToolUse Read. The
+ * no-op gate is the single choke point main.c runs on the hook-client fast
+ * path, so it must agree with ha_process — same lifecycle precedence, same
+ * parser pair — and anything it calls a no-op must be a case ha_process would
+ * also answer with NULL. */
+TEST(cli_hook_augment_no_content_noop_gate) {
+    /* Grep WITH a queryable token must still pay full fare (can produce output). */
+    ASSERT_FALSE(cbm_hook_augment_input_is_noop_bash(
+        "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"cwd\":\"/r\","
+        "\"tool_input\":{\"pattern\":\"someIndexedSymbol\"}}"));
+    /* Grep/Glob whose pattern carries no queryable token (a glob, a path, a
+     * wildcard) have nothing to say. This is the measured 0-byte Glob case. */
+    ASSERT_TRUE(cbm_hook_augment_input_is_noop_bash(
+        "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Grep\",\"cwd\":\"/r\","
+        "\"tool_input\":{\"pattern\":\"*.ts\"}}"));
+    ASSERT_TRUE(cbm_hook_augment_input_is_noop_bash(
+        "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Glob\",\"cwd\":\"/r\","
+        "\"tool_input\":{\"pattern\":\"src/**/*.ts\"}}"));
+    /* Bash non-search stays a no-op (existing fast path). */
+    ASSERT_TRUE(cbm_hook_augment_input_is_noop_bash(
+        "{\"hook_event_name\":\"PreToolUse\",\"tool_name\":\"Bash\",\"cwd\":\"/r\","
+        "\"tool_input\":{\"command\":\"ls -la\"}}"));
+    /* A tool/event pair the augmenter does not support at all is a no-op. */
+    ASSERT_TRUE(cbm_hook_augment_input_is_noop_bash(
+        "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Bash\",\"cwd\":\"/r\","
+        "\"tool_input\":{\"command\":\"ls\"}}"));
+    /* ...but the gate runs before the dialect is known, so "unsupported" means
+     * unsupported for EVERY dialect. The same payload shape is a live coverage
+     * adapter under another dialect — `hook-augment --dialect augment` installs
+     * PostToolUse/view, which ha_process answers with a coverage note — and
+     * gating it here would suppress that note while the augmenter still ran. */
+    ASSERT_FALSE(cbm_hook_augment_input_is_noop_bash(
+        "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"view\",\"cwd\":\"/r\","
+        "\"tool_input\":{\"file_path\":\"src/a.c\"}}"));
+    ASSERT_FALSE(cbm_hook_augment_input_is_noop_bash(
+        "{\"hook_event_name\":\"AfterTool\",\"tool_name\":\"read_file\",\"cwd\":\"/r\","
+        "\"tool_input\":{\"path\":\"src/a.c\"}}"));
+    ASSERT_FALSE(cbm_hook_augment_input_is_noop_bash(
+        "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"ReadFile\",\"cwd\":\"/r\","
+        "\"tool_input\":{\"path\":\"src/a.c\"}}"));
+    /* PostToolUse Read IS supported — it is the coverage adapter, and whether it
+     * has anything to say depends on the graph, so it can never be gated here.
+     * Its 0-byte cost is answered by not installing the entry, not by guessing. */
+    ASSERT_FALSE(cbm_hook_augment_input_is_noop_bash(
+        "{\"hook_event_name\":\"PostToolUse\",\"tool_name\":\"Read\",\"cwd\":\"/r\","
+        "\"tool_input\":{\"file_path\":\"src/a.c\"}}"));
+    /* Lifecycle events always carry routing context: never gated here. */
+    ASSERT_FALSE(cbm_hook_augment_input_is_noop_bash(
+        "{\"hook_event_name\":\"SessionStart\",\"cwd\":\"/r\"}"));
+    /* ...and lifecycle precedence is checked FIRST in ha_process, so a
+     * lifecycle payload that happens to carry a tool_name must not be gated by
+     * the tool/event table (which knows nothing about SessionStart). */
+    ASSERT_FALSE(cbm_hook_augment_input_is_noop_bash(
+        "{\"hook_event_name\":\"SubagentStart\",\"tool_name\":\"Bash\",\"cwd\":\"/r\","
+        "\"tool_input\":{\"command\":\"ls -la\"}}"));
+    /* Malformed input is uncertain → not a no-op (fails open). */
+    ASSERT_FALSE(cbm_hook_augment_input_is_noop_bash("not-json"));
+    PASS();
+}
+
 TEST(cli_hook_augment_bash_pattern_extractor) {
     char out[256];
 
@@ -13167,6 +13259,42 @@ TEST(cli_build_args_json_bad_positional_errors_issue680) {
     PASS();
 }
 
+/* A bare `key=value` argument is the same statement as `--key value`. It used
+ * to be dropped on the floor: run_cli only entered the flag parser for a
+ * leading `--`, so `cli search_graph limit=100` fell through to the stdin/`{}`
+ * branch, the schema defaults applied, and the caller got silently-wrong
+ * pagination (the #997 failure mode, one spelling over). Parse it, and keep
+ * `--key=value` working unchanged. */
+TEST(cli_build_args_json_key_value_without_dashes) {
+    char *err = NULL;
+    char *argv[] = {"limit=100", "offset=50"};
+    char *json = cbm_cli_build_args_json("search_graph", 2, argv, &err);
+    ASSERT_NOT_NULL(json);
+    ASSERT_NULL(err);
+    ASSERT(strstr(json, "\"limit\":100") != NULL);
+    ASSERT(strstr(json, "\"offset\":50") != NULL);
+    /* Integer-typed, so still numbers — not quoted strings. */
+    ASSERT(strstr(json, "\"limit\":\"100\"") == NULL);
+    free(json);
+    free(err);
+
+    /* The `--key=value` spelling is unaffected. */
+    char *argv_dashed[] = {"--limit=100"};
+    json = cbm_cli_build_args_json("search_graph", 1, argv_dashed, &err);
+    ASSERT_NOT_NULL(json);
+    ASSERT(strstr(json, "\"limit\":100") != NULL);
+    free(json);
+
+    /* A dashless token that is NOT a pair stays a loud error, not a silent
+     * drop. */
+    char *argv_bare[] = {"foo"};
+    json = cbm_cli_build_args_json("search_graph", 1, argv_bare, &err);
+    ASSERT_NULL(json);
+    ASSERT_NOT_NULL(err);
+    free(err);
+    PASS();
+}
+
 /* Per-tool --help returns 0 for a known tool, -1 for an unknown one. */
 TEST(cli_print_tool_help_issue680) {
     ASSERT_EQ(cbm_cli_print_tool_help("index_repository"), 0);
@@ -13718,6 +13846,7 @@ SUITE(cli) {
     RUN_TEST(cli_uninstall_removes_skills);
     RUN_TEST(cli_remove_old_monolithic_skill);
     RUN_TEST(cli_skill_files_content);
+    RUN_TEST(cli_skill_lists_every_mcp_tool);
     RUN_TEST(cli_codex_instructions);
 
     /* Editor MCP: Cursor/Windsurf/Gemini (5 tests — install_test.go) */
@@ -13902,6 +14031,7 @@ SUITE(cli) {
 #endif
     RUN_TEST(cli_hook_augment_context_tracks_search_json_shape);
     RUN_TEST(cli_hook_augment_bash_pretooluse_reaches_augmenter);
+    RUN_TEST(cli_hook_augment_no_content_noop_gate);
     RUN_TEST(cli_hook_augment_bash_pattern_extractor);
     RUN_TEST(cli_hook_augment_lifecycle_output_contract);
     RUN_TEST(cli_hook_augment_subagent_tier_router_contract);
@@ -14025,6 +14155,7 @@ SUITE(cli) {
     RUN_TEST(cli_build_args_json_kebab_to_snake_issue680);
     RUN_TEST(cli_build_args_json_key_equals_value_issue680);
     RUN_TEST(cli_build_args_json_bad_positional_errors_issue680);
+    RUN_TEST(cli_build_args_json_key_value_without_dashes);
     RUN_TEST(cli_print_tool_help_issue680);
 
     /* Stdin argument gate (#1359) */
