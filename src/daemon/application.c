@@ -613,12 +613,19 @@ static bool application_cache_dir(char out[APPLICATION_PATH_CAP]) {
         cbm_normalize_path_sep(out);
         return true;
     }
+    /* Must go through the shared resolver: a raw HOME that holds an unexpanded
+     * "%USERPROFILE%" token would yield a RELATIVE cache path, and cbm_mkdir_p()
+     * would then materialize it under the daemon's cwd instead of the real home. */
     char home[APPLICATION_PATH_CAP] = {0};
-    if (!cbm_safe_getenv("HOME", home, sizeof(home), NULL) || !home[0]) {
-        (void)cbm_safe_getenv("USERPROFILE", home, sizeof(home), NULL);
-    }
-    if (!home[0]) {
-        return false;
+    {
+        const char *resolved = cbm_get_home_dir();
+        if (!resolved || !resolved[0]) {
+            return false;
+        }
+        int copied = snprintf(home, sizeof(home), "%s", resolved);
+        if (copied <= 0 || copied >= (int)sizeof(home)) {
+            return false;
+        }
     }
     int written = snprintf(out, APPLICATION_PATH_CAP, "%s/.cache/codebase-memory-mcp", home);
     if (written <= 0 || written >= APPLICATION_PATH_CAP) {
