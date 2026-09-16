@@ -602,12 +602,10 @@ bool cbm_workspace_root_allowed(const char *canonical_path, const char *home_dir
 /* Callers should not each re-derive these; a caller that resolved the home
  * directory differently would classify the same path differently. */
 const char *cbm_workspace_home_dir(void) {
-    const char *home = getenv("HOME");
-    if (home && home[0]) {
-        return home;
-    }
-    home = getenv("USERPROFILE");
-    return (home && home[0]) ? home : NULL;
+    /* Delegate to the shared resolver so this classifier cannot disagree with
+     * cbm_resolve_cache_dir(), and so an unexpanded "%USERPROFILE%" HOME is
+     * rejected rather than treated as a relative path rooted at the cwd. */
+    return cbm_get_home_dir();
 }
 
 const char *cbm_workspace_cache_dir(void) {

@@ -530,11 +530,19 @@ static bool worker_cache_dir(char out[INDEX_WORKER_PATH_CAP]) {
         return true;
     }
     char home[INDEX_WORKER_PATH_CAP] = {0};
-    if (!cbm_safe_getenv("HOME", home, sizeof(home), NULL) || !home[0]) {
-        (void)cbm_safe_getenv("USERPROFILE", home, sizeof(home), NULL);
-    }
-    if (!home[0]) {
-        return false;
+    /* Must go through the shared resolver: a raw HOME that holds an unexpanded
+     * "%USERPROFILE%" token would yield a RELATIVE cache path, and the caller-side
+     * mkdir would then materialize it under the daemon's cwd instead of the real
+     * home. Copy out of the shared static buffer into caller-owned storage. */
+    {
+        const char *resolved = cbm_get_home_dir();
+        if (!resolved || !resolved[0]) {
+            return false;
+        }
+        int copied = snprintf(home, sizeof(home), "%s", resolved);
+        if (copied <= 0 || copied >= (int)sizeof(home)) {
+            return false;
+        }
     }
     int written = snprintf(out, INDEX_WORKER_PATH_CAP, "%s/.cache/codebase-memory-mcp", home);
     if (written <= 0 || written >= INDEX_WORKER_PATH_CAP) {
