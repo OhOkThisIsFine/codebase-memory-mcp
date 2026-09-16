@@ -23,6 +23,15 @@
 #include <sys/stat.h>
 #endif
 
+#ifdef _WIN32
+#include <direct.h>
+#define platform_test_chdir _chdir
+#define platform_test_getcwd _getcwd
+#else
+#define platform_test_chdir chdir
+#define platform_test_getcwd getcwd
+#endif
+
 enum { PLATFORM_TIME_THREADS = 8 };
 enum { PLATFORM_MKDTEMP_THREADS = 8, PLATFORM_MKDTEMP_ITERATIONS = 32 };
 
@@ -419,6 +428,199 @@ TEST(platform_cache_dir_rejects_truncated_override) {
     PASS();
 }
 
+/* An unexpanded Windows-style token must never become a path segment. When
+ * HOME/USERPROFILE hold the literal string "%USERPROFILE%", joining it into
+ * ".../.cache/codebase-memory-mcp" yields a RELATIVE path, and cbm_mkdir_p()
+ * then resolves it against the process cwd — which is how literal
+ * "%USERPROFILE%" directories appeared under ~/.claude/hooks and
+ * ~/.agent-config. The resolver must reject the token instead. */
+TEST(platform_home_dir_rejects_unexpanded_token) {
+    const char *saved_home = getenv("HOME");
+    const char *saved_profile = getenv("USERPROFILE");
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *home_copy = saved_home ? strdup(saved_home) : NULL;
+    char *profile_copy = saved_profile ? strdup(saved_profile) : NULL;
+    char *cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+
+    /* CBM_CACHE_DIR would short-circuit the home-derived path entirely. */
+    (void)cbm_unsetenv("CBM_CACHE_DIR");
+    /* Both variables carry the unexpanded token: nothing usable remains. */
+    ASSERT_EQ(cbm_setenv("HOME", "%USERPROFILE%", 1), 0);
+    ASSERT_EQ(cbm_setenv("USERPROFILE", "%USERPROFILE%", 1), 0);
+
+    bool token_rejected = !cbm_home_dir_value_usable("%USERPROFILE%");
+    bool relative_rejected = !cbm_home_dir_value_usable("relative/dir");
+    bool tilde_rejected = !cbm_home_dir_value_usable("~");
+    bool posix_accepted = cbm_home_dir_value_usable("/home/someone");
+    bool drive_accepted = cbm_home_dir_value_usable("C:/Users/someone");
+    bool unc_accepted = cbm_home_dir_value_usable("\\\\server\\share");
+    const char *resolved_home = cbm_get_home_dir();
+    const char *resolved_cache = cbm_resolve_cache_dir();
+    char resolved_home_copy[CBM_SZ_1K];
+    char resolved_cache_copy[CBM_SZ_1K];
+    snprintf(resolved_home_copy, sizeof(resolved_home_copy), "%s",
+             resolved_home ? resolved_home : "");
+    snprintf(resolved_cache_copy, sizeof(resolved_cache_copy), "%s",
+             resolved_cache ? resolved_cache : "");
+
+    if (home_copy) {
+        (void)cbm_setenv("HOME", home_copy, 1);
+    } else {
+        (void)cbm_unsetenv("HOME");
+    }
+    if (profile_copy) {
+        (void)cbm_setenv("USERPROFILE", profile_copy, 1);
+    } else {
+        (void)cbm_unsetenv("USERPROFILE");
+    }
+    if (cache_copy) {
+        (void)cbm_setenv("CBM_CACHE_DIR", cache_copy, 1);
+    } else {
+        (void)cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(home_copy);
+    free(profile_copy);
+    free(cache_copy);
+
+    ASSERT_TRUE(token_rejected);
+    ASSERT_TRUE(relative_rejected);
+    ASSERT_TRUE(tilde_rejected);
+    ASSERT_TRUE(posix_accepted);
+    ASSERT_TRUE(drive_accepted);
+    ASSERT_TRUE(unc_accepted);
+    /* No literal token may survive into a resolved path, and whatever is
+     * returned must be absolute so it cannot be rooted at the cwd. */
+    ASSERT_NULL(strstr(resolved_home_copy, "%USERPROFILE%"));
+    ASSERT_NULL(strstr(resolved_cache_copy, "%USERPROFILE%"));
+    if (resolved_home_copy[0]) {
+        ASSERT_TRUE(resolved_home_copy[0] == '/' ||
+                    (resolved_home_copy[1] == ':' &&
+                     (resolved_home_copy[2] == '/' || resolved_home_copy[2] == '\\')));
+    }
+    if (resolved_cache_copy[0]) {
+        ASSERT_TRUE(resolved_cache_copy[0] == '/' || resolved_cache_copy[1] == ':');
+    }
+    PASS();
+}
+
+/* The join itself is what makes the token dangerous: a relative "home" plus
+ * the cache suffix stays relative, so mkdir resolves it against the cwd. Pin
+ * that an accepted home always produces a cwd-independent cache path by
+ * resolving from a cwd that is NOT the home directory. */
+TEST(platform_cache_dir_is_absolute_for_accepted_home) {
+    const char *saved_home = getenv("HOME");
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *home_copy = saved_home ? strdup(saved_home) : NULL;
+    char *cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    char saved_cwd[CBM_SZ_1K] = "";
+    bool cwd_saved = platform_test_getcwd(saved_cwd, sizeof(saved_cwd)) != NULL;
+
+    /* CBM_CACHE_DIR outranks the home directory; clear it so this exercises
+     * the home-derived branch rather than an inherited override. */
+    (void)cbm_unsetenv("CBM_CACHE_DIR");
+    ASSERT_EQ(cbm_setenv("HOME", "/tmp/cbm-absolute-home-check", 1), 0);
+    /* Park the process in a cwd far from the fake home, so a relative join
+     * would visibly diverge from the expected absolute result. Restore before
+     * any assertion, since the framework exits the test on failure. */
+    if (cwd_saved) {
+        (void)platform_test_chdir("/");
+    }
+    const char *resolved = cbm_resolve_cache_dir();
+    char resolved_copy[CBM_SZ_1K];
+    snprintf(resolved_copy, sizeof(resolved_copy), "%s", resolved ? resolved : "");
+    if (cwd_saved) {
+        (void)platform_test_chdir(saved_cwd);
+    }
+
+    if (home_copy) {
+        (void)cbm_setenv("HOME", home_copy, 1);
+    } else {
+        (void)cbm_unsetenv("HOME");
+    }
+    if (cache_copy) {
+        (void)cbm_setenv("CBM_CACHE_DIR", cache_copy, 1);
+    } else {
+        (void)cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(home_copy);
+    free(cache_copy);
+
+    ASSERT_STR_EQ(resolved_copy, "/tmp/cbm-absolute-home-check/.cache/codebase-memory-mcp");
+    ASSERT_TRUE(resolved_copy[0] == '/');
+    ASSERT_NULL(strstr(resolved_copy, "%USERPROFILE%"));
+    PASS();
+}
+
+/* The reproduced failure, pinned end-to-end: an unexpanded token in
+ * HOME/USERPROFILE, resolved from a cwd that is NOT the home directory. Before
+ * the fix the resolver handed back the literal token, the cache suffix kept the
+ * path relative, and cbm_mkdir_p() materialized a literal "%USERPROFILE%"
+ * directory under the cwd — which is how the stray trees appeared under
+ * ~/.claude/hooks and ~/.agent-config. Assert the resolved path is absolute and
+ * token-free, and that joining the cache suffix cannot point back at the cwd. */
+TEST(platform_cache_dir_from_non_home_cwd_never_contains_token) {
+    const char *saved_home = getenv("HOME");
+    const char *saved_profile = getenv("USERPROFILE");
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *home_copy = saved_home ? strdup(saved_home) : NULL;
+    char *profile_copy = saved_profile ? strdup(saved_profile) : NULL;
+    char *cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    char saved_cwd[CBM_SZ_1K] = "";
+    bool cwd_saved = platform_test_getcwd(saved_cwd, sizeof(saved_cwd)) != NULL;
+
+    /* CBM_CACHE_DIR short-circuits the home branch entirely; clear it so the
+     * token is what the resolver actually has to deal with. */
+    (void)cbm_unsetenv("CBM_CACHE_DIR");
+    ASSERT_EQ(cbm_setenv("HOME", "%USERPROFILE%", 1), 0);
+    ASSERT_EQ(cbm_setenv("USERPROFILE", "%USERPROFILE%", 1), 0);
+    /* Resolve from a cwd that is deliberately NOT the home directory. A
+     * relative join would produce a path rooted here. Restore the cwd before
+     * asserting: the framework exits the test on the first failure. */
+    char probe_cwd[CBM_SZ_1K] = "";
+    bool have_probe = false;
+    if (cwd_saved && platform_test_chdir("/tmp") == 0) {
+        have_probe = platform_test_getcwd(probe_cwd, sizeof(probe_cwd)) != NULL;
+    }
+    const char *resolved = cbm_resolve_cache_dir();
+    char resolved_copy[CBM_SZ_1K];
+    snprintf(resolved_copy, sizeof(resolved_copy), "%s", resolved ? resolved : "");
+    if (cwd_saved) {
+        (void)platform_test_chdir(saved_cwd);
+    }
+
+    if (home_copy) {
+        (void)cbm_setenv("HOME", home_copy, 1);
+    } else {
+        (void)cbm_unsetenv("HOME");
+    }
+    if (profile_copy) {
+        (void)cbm_setenv("USERPROFILE", profile_copy, 1);
+    } else {
+        (void)cbm_unsetenv("USERPROFILE");
+    }
+    if (cache_copy) {
+        (void)cbm_setenv("CBM_CACHE_DIR", cache_copy, 1);
+    } else {
+        (void)cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(home_copy);
+    free(profile_copy);
+    free(cache_copy);
+
+    /* The token must not survive into the path at all... */
+    ASSERT_NULL(strstr(resolved_copy, "%USERPROFILE%"));
+    /* ...and if anything is resolved it must be absolute, so mkdir cannot
+     * anchor it at the cwd the hook happened to be launched from. */
+    if (resolved_copy[0]) {
+        ASSERT_TRUE(resolved_copy[0] == '/' ||
+                    (resolved_copy[1] == ':' &&
+                     (resolved_copy[2] == '/' || resolved_copy[2] == '\\')));
+        ASSERT_NULL(strstr(resolved_copy, probe_cwd));
+    }
+    (void)have_probe;
+    PASS();
+}
+
 #ifdef _WIN32
 /* cbm_safe_getenv reads Windows' wide environment as UTF-8. Its matching
  * setter must update that same wide environment; _putenv_s alone interprets
@@ -700,6 +902,9 @@ SUITE(platform) {
     RUN_TEST(platform_mmap_nonexistent);
     RUN_TEST(platform_path_helpers_use_per_thread_storage);
     RUN_TEST(platform_cache_dir_rejects_truncated_override);
+    RUN_TEST(platform_home_dir_rejects_unexpanded_token);
+    RUN_TEST(platform_cache_dir_is_absolute_for_accepted_home);
+    RUN_TEST(platform_cache_dir_from_non_home_cwd_never_contains_token);
 #ifdef _WIN32
     RUN_TEST(platform_setenv_preserves_utf8_in_wide_environment);
     RUN_TEST(platform_windows_empty_environment_is_read_and_unset_idempotently);

@@ -124,8 +124,14 @@ const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const ch
 /* ── Home directory ─────────────────────────────────────────────── */
 
 /* Cross-platform home directory: tries HOME first, then USERPROFILE (Windows).
- * Returns NULL when neither is set. */
+ * Returns NULL when neither is set, or when the only values present are
+ * unusable — relative, or an unexpanded "%USERPROFILE%"/"~" token. */
 const char *cbm_get_home_dir(void);
+
+/* Whether an environment value can serve as a home directory: absolute, and
+ * not a literal unexpanded "%VAR%" / "~" token. Shared with the callers that
+ * read HOME/USERPROFILE directly, so every classifier agrees. */
+bool cbm_home_dir_value_usable(const char *value);
 
 /* ── App config directories ────────────────────────────────────── */
 

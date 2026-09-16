@@ -437,19 +437,49 @@ const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const ch
 
 /* ── Home directory (cross-platform) ───────────────────── */
 
+/* A usable home directory is an ABSOLUTE path. Two shapes are rejected:
+ *
+ *  - a relative value ("foo", "./foo"), and
+ *  - an UNEXPANDED Windows-style token ("%USERPROFILE%", "~", "%HOMEDRIVE%%HOMEPATH%").
+ *
+ * Both are accepted verbatim by the environment lookup, and both are then
+ * joined into ".../.cache/codebase-memory-mcp". Because the joined path is
+ * relative, the daemon's cbm_mkdir_p() resolves it against the process's
+ * current working directory, silently materializing a literal "%USERPROFILE%"
+ * directory next to whatever cwd the launching hook happened to have
+ * (observed under ~/.claude/hooks and ~/.agent-config). Treating such a value
+ * as "unset" makes callers fall through to the real variable or fail loudly
+ * instead of writing a stray cache tree. */
+bool cbm_home_dir_value_usable(const char *value) {
+    if (!value || !value[0] || value[0] == '%' || value[0] == '~') {
+        return false;
+    }
+    /* Absolute POSIX path, a Windows drive/UNC root ("C:/x", "//server/share",
+     * "\\server\share"), or a drive-rooted path ("\x"). Anything else is relative
+     * to the cwd and must not become a cache parent. */
+    if (value[0] == '/' || value[0] == '\\') {
+        return true;
+    }
+    bool drive_letter = (value[0] >= 'a' && value[0] <= 'z') ||
+                        (value[0] >= 'A' && value[0] <= 'Z');
+    return drive_letter && value[1] == ':' && (value[2] == '/' || value[2] == '\\');
+}
+
 const char *cbm_get_home_dir(void) {
     static CBM_TLS char buf[CBM_SZ_1K];
     char tmp[CBM_SZ_256] = "";
 
+    /* HOME can be present but unusable; keep probing rather than accepting it,
+     * so an exported literal token does not mask a valid USERPROFILE. */
     cbm_safe_getenv("HOME", tmp, sizeof(tmp), NULL);
-    if (tmp[0]) {
+    if (cbm_home_dir_value_usable(tmp)) {
         snprintf(buf, sizeof(buf), "%s", tmp);
         cbm_normalize_path_sep(buf);
         return buf;
     }
 
     cbm_safe_getenv("USERPROFILE", tmp, sizeof(tmp), NULL);
-    if (tmp[0]) {
+    if (cbm_home_dir_value_usable(tmp)) {
         snprintf(buf, sizeof(buf), "%s", tmp);
         cbm_normalize_path_sep(buf);
         return buf;
