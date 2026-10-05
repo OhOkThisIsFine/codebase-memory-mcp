@@ -651,7 +651,9 @@ static bool cli_activation_production_context_init(cli_activation_production_con
         !cbm_daemon_ipc_private_directory_secure(context->canonical_cache)) {
         return false;
     }
+#ifdef _WIN32
     cbm_normalize_path_sep(context->canonical_cache);
+#endif
     if (cbm_setenv("CBM_CACHE_DIR", context->canonical_cache, 1) != 0) {
         return false;
     }

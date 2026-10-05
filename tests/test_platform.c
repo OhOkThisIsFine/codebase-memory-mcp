@@ -979,7 +979,136 @@ TEST(cgroup_no_mem_files) {
 
 #endif /* __linux__ */
 
+TEST(platform_app_paths_preserve_complete_home_or_fail) {
+    const char *names[] = {"HOME", "USERPROFILE", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA"};
+    char *saved[5];
+    int failures = 0;
+    for (int i = 0; i < 5; i++) {
+        const char *value = getenv(names[i]);
+        saved[i] = value ? strdup(value) : NULL;
+        failures += cbm_unsetenv(names[i]) != 0;
+    }
+#ifdef _WIN32
+    const char *prefix = "C:/fixture/home/";
+    const char *config_suffix = "/AppData/Roaming";
+    const char *local_suffix = "/AppData/Local";
+#else
+    const char *prefix = "/fixture/home/";
+    const char *config_suffix = "/.config";
+    const char *local_suffix = "/.config";
+#endif
+    char home[4097], expected[4200];
+    const size_t lengths[] = {255, 256, 1020, 3000, 4090, 4096};
+    for (size_t n = 0; n < sizeof(lengths) / sizeof(lengths[0]); n++) {
+        size_t len = lengths[n];
+        size_t start = strlen(prefix);
+        memcpy(home, prefix, start);
+        for (size_t i = start; i < len; i++)
+            home[i] = (i % 60 == 0) ? '/' : 'h';
+        home[len] = '\0';
+        failures += cbm_setenv("HOME", home, 1) != 0;
+        const char *config = cbm_app_config_dir();
+        if (len + strlen(config_suffix) >= 4096) {
+            failures += config != NULL;
+        } else {
+            snprintf(expected, sizeof(expected), "%s%s", home, config_suffix);
+            failures += !config || strcmp(config, expected) != 0;
+        }
+        const char *local = cbm_app_local_dir();
+        if (len + strlen(local_suffix) >= 4096) {
+            failures += local != NULL;
+        } else {
+            snprintf(expected, sizeof(expected), "%s%s", home, local_suffix);
+            failures += !local || strcmp(local, expected) != 0;
+        }
+    }
+    /* UTF-8 bytes, not character count, determine the product bound. */
+    snprintf(home, sizeof(home), "%s", prefix);
+    size_t start = strlen(home);
+    for (size_t i = start; i < start + 1200; i += 3)
+        memcpy(home + i, "\xe6\x97\xa5", 3);
+    home[start + 1200] = '\0';
+    failures += cbm_setenv("HOME", home, 1) != 0;
+    const char *config = cbm_app_config_dir();
+    snprintf(expected, sizeof(expected), "%s%s", home, config_suffix);
+    failures += !config || strcmp(config, expected) != 0;
+    const char *local = cbm_app_local_dir();
+    snprintf(expected, sizeof(expected), "%s%s", home, local_suffix);
+    failures += !local || strcmp(local, expected) != 0;
+    failures += cbm_setenv("USERPROFILE", home, 1) != 0;
+    failures += cbm_setenv("HOME", "%USERPROFILE%", 1) != 0;
+    config = cbm_app_config_dir();
+    snprintf(expected, sizeof(expected), "%s%s", home, config_suffix);
+    failures += !config || strcmp(config, expected) != 0;
+#ifdef _WIN32
+    const char *config_variable = "APPDATA";
+    const char *local_variable = "LOCALAPPDATA";
+#else
+    const char *config_variable = "XDG_CONFIG_HOME";
+    const char *local_variable = "XDG_CONFIG_HOME";
+#endif
+    /* A complete explicit override takes precedence and carries no suffix. */
+    failures += cbm_setenv(config_variable, home, 1) != 0;
+    failures += cbm_setenv(local_variable, home, 1) != 0;
+    config = cbm_app_config_dir();
+    failures += !config || strcmp(config, home) != 0;
+    local = cbm_app_local_dir();
+    failures += !local || strcmp(local, home) != 0;
+    /* An unreadable override must not silently select another directory. */
+    memset(home, 'h', sizeof(home) - 1);
+    home[sizeof(home) - 1] = '\0';
+    failures += cbm_setenv(config_variable, home, 1) != 0;
+    failures += cbm_setenv(local_variable, home, 1) != 0;
+    failures += cbm_app_config_dir() != NULL;
+    failures += cbm_app_local_dir() != NULL;
+    for (int i = 0; i < 5; i++) {
+        if (saved[i])
+            (void)cbm_setenv(names[i], saved[i], 1);
+        else
+            (void)cbm_unsetenv(names[i]);
+        free(saved[i]);
+    }
+    ASSERT_EQ(failures, 0);
+    PASS();
+}
+
+TEST(platform_cache_preserves_native_literal_bytes) {
+    const char *names[] = {"HOME", "USERPROFILE", "CBM_CACHE_DIR"};
+    char *saved[3];
+    int failures = 0;
+    for (int i = 0; i < 3; i++) {
+        const char *value = getenv(names[i]);
+        saved[i] = value ? strdup(value) : NULL;
+        failures += cbm_unsetenv(names[i]) != 0;
+    }
+#ifdef _WIN32
+    const char *home = "C:\\fixture\\home";
+    const char *expected = "C:/fixture/home/.cache/codebase-memory-mcp";
+#else
+    const char *home = "/fixture/home\\literal";
+    const char *expected = "/fixture/home\\literal/.cache/codebase-memory-mcp";
+#endif
+    failures += cbm_setenv("HOME", home, 1) != 0;
+    const char *cache = cbm_resolve_cache_dir();
+    failures += !cache || strcmp(cache, expected) != 0;
+    /* A published canonical override must retain the same native identity. */
+    failures += cbm_setenv("CBM_CACHE_DIR", expected, 1) != 0;
+    cache = cbm_resolve_cache_dir();
+    failures += !cache || strcmp(cache, expected) != 0;
+    for (int i = 0; i < 3; i++) {
+        if (saved[i])
+            (void)cbm_setenv(names[i], saved[i], 1);
+        else
+            (void)cbm_unsetenv(names[i]);
+        free(saved[i]);
+    }
+    ASSERT_EQ(failures, 0);
+    PASS();
+}
+
 SUITE(platform) {
+    RUN_TEST(platform_app_paths_preserve_complete_home_or_fail);
+    RUN_TEST(platform_cache_preserves_native_literal_bytes);
     RUN_TEST(platform_home_native_syntax_and_precedence);
     RUN_TEST(platform_file_apis_survive_max_path_overflow);
     RUN_TEST(platform_mkstemp_and_mkdtemp_survive_non_ascii_directory);

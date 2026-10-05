@@ -346,6 +346,9 @@ CBM_TEST_BINARY="$WATCHDOG_BINARY" bash "$ROOT/tests/test_worker_error_response.
 echo "=== Step 5e: watcher_enabled kill-switch regression (#335) ==="
 CBM_TEST_BINARY="$WATCHDOG_BINARY" bash "$ROOT/tests/test_watcher_disabled.sh"
 
+echo "=== Step 5f: native HOME cache identity regression ==="
+CBM_TEST_BINARY="$WATCHDOG_BINARY" bash "$ROOT/tests/test_native_home_cache_identity.sh"
+
 # Step 6: security-strings URL allow-list regression. The MSYS2 CLANG64 toolchain
 # bakes its package-tracker URL into the static Windows .exe; the binary string
 # audit must allow-list it (Windows-only — Linux smoke never saw it).

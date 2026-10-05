@@ -1255,7 +1255,9 @@ static main_build_identity_status_t main_build_identity(cbm_daemon_build_identit
     if (!cache_ready || !cbm_is_dir(canonical_cache)) {
         return MAIN_BUILD_IDENTITY_CACHE_CANONICALIZE;
     }
+#ifdef _WIN32
     cbm_normalize_path_sep(canonical_cache);
+#endif
     /* Admission is account-scoped, so its storage authority must be too.
      * Harden the canonical object before hashing it. Replacement of this
      * owner-only path by the same already-compromised OS account is outside

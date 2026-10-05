@@ -518,54 +518,43 @@ const char *cbm_get_home_dir(void) {
 
 /* ── App config directories (cross-platform) ────────── */
 
-const char *cbm_app_config_dir(void) {
-    static CBM_TLS char buf[CBM_SZ_1K];
-    char tmp[CBM_SZ_256] = "";
+static const char *platform_app_dir(const char *variable, const char *suffix, char *buf,
+                                    size_t size) {
+    if (!cbm_safe_getenv(variable, buf, size, "")) {
+        return NULL;
+    }
+    if (buf[0]) {
 #ifdef _WIN32
-    cbm_safe_getenv("APPDATA", tmp, sizeof(tmp), NULL);
-    if (tmp[0]) {
-        snprintf(buf, sizeof(buf), "%s", tmp);
         cbm_normalize_path_sep(buf);
+#endif
         return buf;
     }
     const char *home = cbm_get_home_dir();
-    if (home) {
-        snprintf(buf, sizeof(buf), "%s/AppData/Roaming", home);
-        return buf;
+    if (!home) {
+        return NULL;
     }
-    return NULL;
+    int written = snprintf(buf, size, "%s%s", home, suffix);
+    if (written <= 0 || (size_t)written >= size) {
+        buf[0] = '\0';
+        return NULL;
+    }
+    return buf;
+}
+
+const char *cbm_app_config_dir(void) {
+    static CBM_TLS char buf[CBM_SZ_4K];
+#ifdef _WIN32
+    return platform_app_dir("APPDATA", "/AppData/Roaming", buf, sizeof(buf));
 #else
     /* Linux: XDG_CONFIG_HOME or ~/.config */
-    cbm_safe_getenv("XDG_CONFIG_HOME", tmp, sizeof(tmp), NULL);
-    if (tmp[0]) {
-        snprintf(buf, sizeof(buf), "%s", tmp);
-        return buf;
-    }
-    const char *home = cbm_get_home_dir();
-    if (home) {
-        snprintf(buf, sizeof(buf), "%s/.config", home);
-        return buf;
-    }
-    return NULL;
+    return platform_app_dir("XDG_CONFIG_HOME", "/.config", buf, sizeof(buf));
 #endif /* _WIN32 */
 }
 
 const char *cbm_app_local_dir(void) {
 #ifdef _WIN32
-    static CBM_TLS char buf[CBM_SZ_1K];
-    char tmp[CBM_SZ_256] = "";
-    cbm_safe_getenv("LOCALAPPDATA", tmp, sizeof(tmp), NULL);
-    if (tmp[0]) {
-        snprintf(buf, sizeof(buf), "%s", tmp);
-        cbm_normalize_path_sep(buf);
-        return buf;
-    }
-    const char *home = cbm_get_home_dir();
-    if (home) {
-        snprintf(buf, sizeof(buf), "%s/AppData/Local", home);
-        return buf;
-    }
-    return NULL;
+    static CBM_TLS char buf[CBM_SZ_4K];
+    return platform_app_dir("LOCALAPPDATA", "/AppData/Local", buf, sizeof(buf));
 #else
     return cbm_app_config_dir();
 #endif
@@ -584,7 +573,9 @@ const char *cbm_resolve_cache_dir(void) {
         return NULL;
     }
     if (strcmp(configured, missing) != 0 && configured[0]) {
+#ifdef _WIN32
         cbm_normalize_path_sep(buf);
+#endif
         return buf;
     }
     const char *home = cbm_get_home_dir();
