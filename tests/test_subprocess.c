@@ -560,6 +560,27 @@ TEST(subprocess_quiet_timeout_kills_ignoring_tree) {
 #endif
 }
 
+#ifdef _WIN32
+typedef struct {
+    uint64_t started_ms;
+    char text[4096];
+    size_t used;
+} windows_readiness_log_t;
+
+static void capture_windows_readiness_log(const char *line, void *opaque) {
+    windows_readiness_log_t *log = opaque;
+    if (log->used >= sizeof(log->text) - 1) {
+        return;
+    }
+    int written = snprintf(log->text + log->used, sizeof(log->text) - log->used, "[%llu ms] %s\n",
+                           (unsigned long long)(cbm_now_ms() - log->started_ms), line);
+    if (written > 0) {
+        size_t available = sizeof(log->text) - log->used - 1;
+        log->used += (size_t)written < available ? (size_t)written : available;
+    }
+}
+#endif
+
 TEST(subprocess_windows_job_object_cancellation_quiesces_descendant_tree) {
 #ifndef _WIN32
     SKIP_PLATFORM("native Windows Job Object descendant-tree probe");
@@ -570,6 +591,8 @@ TEST(subprocess_windows_job_object_cancellation_quiesces_descendant_tree) {
     char pid_path[MAX_PATH];
     ASSERT_TRUE(GetTempFileNameA(temp_dir, "cbm", 0, pid_path) != 0);
     ASSERT_TRUE(DeleteFileA(pid_path));
+    char log_path[MAX_PATH];
+    ASSERT_TRUE(GetTempFileNameA(temp_dir, "cbl", 0, log_path) != 0);
 
     char system_directory[MAX_PATH];
     UINT system_length = GetSystemDirectoryA(system_directory, (UINT)sizeof(system_directory));
@@ -581,10 +604,11 @@ TEST(subprocess_windows_job_object_cancellation_quiesces_descendant_tree) {
     char script[4096];
     int script_length = snprintf(
         script, sizeof(script),
-        "$child=Start-Process powershell.exe "
+        "Write-Output 'cbm-test root-started'; $child=Start-Process powershell.exe "
         "-ArgumentList '-NoProfile','-Command','while ($true) { Start-Sleep -Milliseconds 100 }' "
         "-WindowStyle Hidden -PassThru; Set-Content -Encoding ASCII -LiteralPath '%s' "
         "-Value ($PID.ToString() + ' ' + $child.Id.ToString()); "
+        "Write-Output 'cbm-test child-started'; "
         "while ($true) { Start-Sleep -Milliseconds 100 }",
         pid_path);
     ASSERT_TRUE(script_length > 0 && (size_t)script_length < sizeof(script));
@@ -594,20 +618,33 @@ TEST(subprocess_windows_job_object_cancellation_quiesces_descendant_tree) {
     opts.bin = powershell_path;
     opts.argv = argv;
     opts.cancel_grace_ms = 100;
+    windows_readiness_log_t readiness_log = {.started_ms = cbm_now_ms()};
+    opts.log_file = log_path;
+    opts.on_log_line = capture_windows_readiness_log;
+    opts.log_ud = &readiness_log;
+    opts.delete_log_on_exit = true;
     cbm_subprocess_t *process = NULL;
     ASSERT_EQ(cbm_subprocess_spawn(&opts, &process), 0);
     ASSERT_NOT_NULL(process);
+    uint64_t spawn_elapsed_ms = cbm_now_ms() - readiness_log.started_ms;
 
     DWORD root_pid = 0;
     DWORD grandchild_pid = 0;
-    uint64_t ready_deadline = cbm_now_ms() + 3000U;
+    uint64_t ready_started_ms = cbm_now_ms();
+    uint64_t ready_deadline = ready_started_ms + 3000U;
+    cbm_proc_result_t readiness_result = {0};
+    cbm_proc_poll_t readiness_state = CBM_PROC_POLL_RUNNING;
+    int probe_errno = 0;
+    int probe_fields = 0;
     bool ready = false;
     while (cbm_now_ms() < ready_deadline) {
         FILE *pid_file = fopen(pid_path, "r");
+        probe_errno = pid_file ? 0 : errno;
         if (pid_file) {
             unsigned long root_value = 0;
             unsigned long grandchild_value = 0;
             int fields = fscanf(pid_file, "%lu %lu", &root_value, &grandchild_value);
+            probe_fields = fields;
             (void)fclose(pid_file);
             if (fields == 2 && root_value > 0 && grandchild_value > 0) {
                 root_pid = (DWORD)root_value;
@@ -616,12 +653,13 @@ TEST(subprocess_windows_job_object_cancellation_quiesces_descendant_tree) {
                 break;
             }
         }
-        cbm_proc_result_t ignored;
-        if (cbm_subprocess_poll(process, &ignored) != CBM_PROC_POLL_RUNNING) {
+        readiness_state = cbm_subprocess_poll(process, &readiness_result);
+        if (readiness_state != CBM_PROC_POLL_RUNNING) {
             break;
         }
         Sleep(10);
     }
+    uint64_t ready_elapsed_ms = cbm_now_ms() - ready_started_ms;
 
     HANDLE root_handle =
         ready ? OpenProcess(SYNCHRONIZE | PROCESS_TERMINATE, FALSE, root_pid) : NULL;
@@ -684,6 +722,30 @@ TEST(subprocess_windows_job_object_cancellation_quiesces_descendant_tree) {
         cbm_subprocess_destroy(process);
     }
     (void)DeleteFileA(pid_path);
+    (void)DeleteFileA(log_path);
+
+    if (!ready) {
+        fprintf(stderr,
+                "windows_job readiness failed: spawn_ms=%llu ready_ms=%llu poll=%d "
+                "probe_errno=%d fields=%d pre_cancel_outcome=%d pre_cancel_exit=%d "
+                "cancelled=%d terminal=%d cleanup_terminal=%d tree_quiesced=%d "
+                "supervision_failed=%d log=",
+                (unsigned long long)spawn_elapsed_ms, (unsigned long long)ready_elapsed_ms,
+                (int)readiness_state, probe_errno, probe_fields,
+                readiness_state == CBM_PROC_POLL_TERMINAL ? (int)readiness_result.outcome : -1,
+                readiness_state == CBM_PROC_POLL_TERMINAL ? readiness_result.exit_code : -1,
+                cancelled, terminal, cleanup_terminal, result.tree_quiesced,
+                result.supervision_failed);
+        for (size_t i = 0; i < readiness_log.used; i++) {
+            unsigned char byte = (unsigned char)readiness_log.text[i];
+            if (byte < 0x20 || byte == 0x7f) {
+                fprintf(stderr, "\\x%02x", byte);
+            } else {
+                fputc(byte, stderr);
+            }
+        }
+        fputc('\n', stderr);
+    }
 
     ASSERT_TRUE(ready);
     ASSERT_TRUE(cancelled);
