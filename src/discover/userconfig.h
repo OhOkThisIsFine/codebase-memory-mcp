@@ -41,7 +41,8 @@ typedef struct {
  * Load user config from global + project files, merge (project wins).
  * repo_path: absolute path to the repository root (for project config).
  * Returns a heap-allocated cbm_userconfig_t (caller must free via
- * cbm_userconfig_free). Returns NULL only on allocation failure.
+ * cbm_userconfig_free). Returns NULL on allocation failure or when the global
+ * configuration directory cannot be resolved completely.
  * Missing config files are silently ignored.
  */
 cbm_userconfig_t *cbm_userconfig_load(const char *repo_path);
