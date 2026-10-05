@@ -1,37 +1,63 @@
-# Fast repro lane — single platform, NO sanitizers — for quick fix-iteration
-# feedback (the red-count after a fix) without waiting ~15 min for the full
-# 5-platform ASan board. The full bug-repro.yml board remains the comprehensive
-# all-platform check; this is just the fast inner loop.
-#
-# Trigger: workflow_dispatch, or push to a qa/fast-** branch. Non-gating.
-name: Fast Repro
-
+name: PR1 Native Quiet Probe
 on:
   workflow_dispatch:
-    inputs:
-      suites:
-        description: 'Comma list of suite-name substrings to run (empty = all)'
-        type: string
-        default: ''
-  push:
-    branches: ['qa/fast-**']
-
 permissions:
   contents: read
-
 jobs:
-  fast:
-    runs-on: ubuntu-latest
-    timeout-minutes: 240
+  quiet:
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include:
+          - os: windows-2025
+            msystem: CLANG64
+            pkg: x86_64
+          - os: windows-11-arm
+            msystem: CLANGARM64
+            pkg: aarch64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Install deps
-        run: sudo apt-get update && sudo apt-get install -y zlib1g-dev
-      - name: test-repro (single platform, ASan; CBM_REPRO_ONLY filters suites)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 5eb8e04eb4c815e2dab63adaac046412ce240acc
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: ${{ matrix.msystem }}
+          path-type: inherit
+          install: >-
+            mingw-w64-clang-${{ matrix.pkg }}-clang
+            mingw-w64-clang-${{ matrix.pkg }}-compiler-rt
+            mingw-w64-clang-${{ matrix.pkg }}-zlib
+            mingw-w64-clang-${{ matrix.pkg }}-python3
+            mingw-w64-clang-${{ matrix.pkg }}-ccache
+            make
+            git
+      - name: Protected owned fixture root
+        shell: pwsh
+        run: |
+          $root = & scripts/ci/new-protected-temp-root.ps1 -Prefix 'cbm-pr1-quiet-' -ProtectDir (Join-Path $env:GITHUB_WORKSPACE "build\c")
+          "CBM_CI_TEMP_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: quiet-probe-${{ matrix.os }}-${{ github.sha }}
+          restore-keys: |
+            ccache-test-${{ matrix.os }}-${{ matrix.msystem }}-
+      - name: Unchanged source, deadlines and assertions; three quiet trials
+        shell: msys2 {0}
         env:
-          # Optionally narrow to specific suites for a fast targeted check, e.g.
-          # CBM_REPRO_ONLY="repro_invariant_enclosing_parity,repro_grammar_systems".
-          # Empty = run all. (No-sanitizer builds crash on some suites, so ASan
-          # stays on; the single-platform run is the speedup vs the 5-platform board.)
-          CBM_REPRO_ONLY: ${{ github.event.inputs.suites }}
-        run: scripts/repro.sh CC=gcc CXX=g++
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_MAXSIZE: 1500M
+        run: |
+          export TEMP="$(cygpath -m "$CBM_CI_TEMP_ROOT")" TMPDIR="$(cygpath -u "$CBM_CI_TEMP_ROOT")"
+          export TMP="$TEMP"
+          git rev-parse HEAD
+          status=0
+          scripts/test.sh --suites index_format,subprocess CC=clang CXX=clang++ || status=1
+          for trial in 2 3; do
+            echo "quiet trial=$trial"
+            build/c/test-runner.exe index_format subprocess || status=1
+          done
+          exit "$status"
