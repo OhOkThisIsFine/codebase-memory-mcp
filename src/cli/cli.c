@@ -1766,14 +1766,20 @@ static bool cbm_json_mcp_command_path_probe_safe(const char *command) {
 #endif
 
 #ifdef CBM_CLI_ENABLE_TEST_API
+#ifdef _WIN32
 static CBM_TLS int *g_mcp_command_path_probe_counter = NULL;
+#endif
 
 bool cbm_mcp_command_path_probe_safe_for_testing(const char *command, bool windows) {
     return cbm_json_mcp_command_path_probe_safe_for_platform(command, windows);
 }
 
 void cbm_set_mcp_command_path_probe_counter_for_testing(int *counter) {
+#ifdef _WIN32
     g_mcp_command_path_probe_counter = counter;
+#else
+    (void)counter;
+#endif
 }
 #endif
 
