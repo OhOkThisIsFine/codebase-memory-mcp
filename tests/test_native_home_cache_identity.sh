@@ -45,12 +45,14 @@ for mode in ('startup', 'worker', 'activation'):
                    '--dir', str(fixture / 'bin')]
     result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=30)
     if mode == 'startup':
-        assert result.returncode == 1 and 'not running' in result.stderr, result.stderr
+        assert result.returncode == 1 and 'not running' in result.stdout, (
+            result.returncode, result.stdout, result.stderr)
     elif mode == 'worker':
-        assert result.returncode == 0, result.stderr
-        assert response.is_file() and 'Pipeline failed' in response.read_text(), result.stderr
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+        assert response.is_file() and 'Pipeline failed' in response.read_text(), (
+            result.stdout, result.stderr)
     else:
-        assert result.returncode == 0, result.stderr
+        assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
     cache = home / '.cache/codebase-memory-mcp'
     rewritten = fixture / 'home/literal'
     assert cache.is_dir(), f'{mode}: native cache missing: {cache}'
