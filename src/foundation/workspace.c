@@ -261,6 +261,9 @@ static bool ws_paths_equal(const char *a, const char *b) {
 
 cbm_ws_verdict_t cbm_workspace_classify_root(const char *canonical_path, const char *home_dir,
                                              const char *cache_dir) {
+    if (home_dir && !home_dir[0]) {
+        return CBM_WS_DENY_HOME_UNAVAILABLE;
+    }
     if (!canonical_path || !canonical_path[0] || ws_volume_prefix_len(canonical_path) == 0) {
         /* A relative or empty path is not a usable root; refuse it the same way
          * as a volume root rather than letting it fall through as allowed. */
@@ -349,6 +352,9 @@ const char *cbm_workspace_verdict_reason(cbm_ws_verdict_t verdict) {
         return "path is a volume root or holds the codebase-memory cache; it cannot be indexed";
     case CBM_WS_DENY_SENSITIVE:
         return "path is a home, credential, system, or application-install directory";
+    case CBM_WS_DENY_HOME_UNAVAILABLE:
+        return "home identity could not be read completely; correct HOME/USERPROFILE before "
+               "indexing";
     default:
         break;
     }
@@ -605,7 +611,9 @@ const char *cbm_workspace_home_dir(void) {
     /* Delegate to the shared resolver so this classifier cannot disagree with
      * cbm_resolve_cache_dir(), and so an unexpanded "%USERPROFILE%" HOME is
      * rejected rather than treated as a relative path rooted at the cwd. */
-    return cbm_get_home_dir();
+    bool read_failed;
+    const char *home = cbm_get_home_dir_checked(&read_failed);
+    return read_failed ? "" : home;
 }
 
 const char *cbm_workspace_cache_dir(void) {

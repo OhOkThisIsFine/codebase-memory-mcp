@@ -128,6 +128,10 @@ const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const ch
  * unusable — relative, or an unexpanded "%USERPROFILE%"/"~" token. */
 const char *cbm_get_home_dir(void);
 
+/* Same resolver; distinguishes absence/unusable syntax from a failed read or
+ * a value outside the 4096-byte product bound. read_failed must be non-NULL. */
+const char *cbm_get_home_dir_checked(bool *read_failed);
+
 /* Whether an environment value can serve as a home directory: absolute, and
  * not a literal unexpanded "%VAR%" / "~" token. Shared with the callers that
  * read HOME/USERPROFILE directly, so every classifier agrees. */

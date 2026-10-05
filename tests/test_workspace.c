@@ -9,6 +9,8 @@
 #include "test_helpers.h"
 #include "foundation/workspace.h"
 #include "foundation/compat_fs.h"
+#include "foundation/platform.h"
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -140,8 +142,7 @@ TEST(ws_windows_user_programs_tree_has_exact_sensitive_boundaries) {
         "c:\\uSeRs\\Dev\\aPpDaTa\\LoCaL\\pRoGrAmS\\IDE",
     };
     for (size_t i = 0; i < sizeof(sensitive) / sizeof(sensitive[0]); i++) {
-        ASSERT_EQ(cbm_workspace_classify_root(sensitive[i], HOME, CACHE),
-                  CBM_WS_DENY_SENSITIVE);
+        ASSERT_EQ(cbm_workspace_classify_root(sensitive[i], HOME, CACHE), CBM_WS_DENY_SENSITIVE);
     }
 
     static const char *const allowed[] = {
@@ -231,8 +232,7 @@ TEST(ws_sensitive_approval_adds_exact_exception_under_ordinary_ancestor) {
     ASSERT_FALSE(cbm_workspace_root_allowed(sensitive, sensitive, cache, NULL, err, sizeof(err)));
 
     ASSERT_TRUE(cbm_workspace_grant_add(cache, sensitive, sensitive, true, err, sizeof(err)));
-    ASSERT_TRUE(
-        cbm_workspace_root_allowed(sensitive, sensitive, cache, NULL, err, sizeof(err)));
+    ASSERT_TRUE(cbm_workspace_root_allowed(sensitive, sensitive, cache, NULL, err, sizeof(err)));
     ASSERT_TRUE(cbm_workspace_grant_add(cache, sensitive, sensitive, true, err, sizeof(err)));
 
     char listed[4096];
@@ -268,6 +268,8 @@ TEST(ws_every_verdict_has_a_reason) {
     ASSERT_NOT_NULL(cbm_workspace_verdict_reason(CBM_WS_DENY_TOO_SHALLOW));
     ASSERT_NOT_NULL(cbm_workspace_verdict_reason(CBM_WS_DENY_ABSOLUTE));
     ASSERT_NOT_NULL(cbm_workspace_verdict_reason(CBM_WS_DENY_SENSITIVE));
+    ASSERT_NOT_NULL(cbm_workspace_verdict_reason(CBM_WS_DENY_HOME_UNAVAILABLE));
+    ASSERT_FALSE(cbm_workspace_verdict_is_overridable(CBM_WS_DENY_HOME_UNAVAILABLE));
     /* Reasons are user-facing; a bare enum name would not help anyone. */
     ASSERT_TRUE(strlen(cbm_workspace_verdict_reason(CBM_WS_DENY_TOO_SHALLOW)) > 20);
     PASS();
@@ -375,7 +377,99 @@ TEST(ws_manifest_approval_refuses_overbroad_requests) {
     PASS();
 }
 
+/* Environment integration: cache override must not erase home identity. */
+TEST(ws_environment_home_identity_boundaries) {
+    const char *names[] = {"HOME", "USERPROFILE", "CBM_CACHE_DIR"};
+    char *saved[3];
+    for (int i = 0; i < 3; i++) {
+        const char *v = getenv(names[i]);
+        saved[i] = v ? strdup(v) : NULL;
+    }
+    char *cache = th_mktempdir("cbm-home-policy");
+    ASSERT_NOT_NULL(cache);
+    int failures = 0;
+    const size_t lengths[] = {255, 256, 700, 4095, 4096, 5000};
+    char home[5001];
+    for (size_t n = 0; n < sizeof(lengths) / sizeof(lengths[0]); n++) {
+        size_t len = lengths[n];
+#ifdef _WIN32
+        memcpy(home, "C:/fixture/home/", 16);
+        size_t start = 16;
+#else
+        memcpy(home, "/fixture/home/", 14);
+        size_t start = 14;
+#endif
+        for (size_t i = start; i < len; i++)
+            home[i] = (i % 60 == 0) ? '/' : 'a';
+        home[len] = '\0';
+        failures += cbm_setenv("HOME", home, 1) != 0;
+        failures += cbm_unsetenv("USERPROFILE") != 0;
+        failures += cbm_setenv("CBM_CACHE_DIR", cache, 1) != 0;
+        const char *resolved = cbm_workspace_home_dir();
+        if (len < 4096) {
+            failures += !resolved || strcmp(resolved, home) != 0;
+            failures += cbm_workspace_classify_root(home, resolved, cache) != CBM_WS_DENY_SENSITIVE;
+            if (len < 700) {
+                char project[5010];
+                snprintf(project, sizeof(project), "%s/project", home);
+                failures += cbm_workspace_classify_root(project, resolved, cache) != CBM_WS_ALLOW;
+            }
+        }
+        char err[1024];
+        failures += cbm_workspace_root_allowed(home, resolved, cache, home, err, sizeof(err));
+        failures += cbm_workspace_grant_add(cache, resolved, home, false, err, sizeof(err));
+        if (len >= 4096) {
+            failures += cbm_workspace_grant_add(cache, resolved, home, true, err, sizeof(err));
+        }
+    }
+    /* UTF-8 byte length crosses the old 256-byte boundary. */
+    for (size_t i = 16; i < 316; i += 3)
+        memcpy(home + i, "\xe6\x97\xa5", 3);
+    home[316] = '\0';
+    failures += cbm_setenv("HOME", home, 1) != 0;
+    const char *resolved = cbm_workspace_home_dir();
+    failures += !resolved || strcmp(home, resolved) != 0;
+    failures += cbm_workspace_classify_root(home, resolved, cache) != CBM_WS_DENY_SENSITIVE;
+    failures += cbm_setenv("USERPROFILE", home, 1) != 0;
+    failures += cbm_setenv("HOME", "%USERPROFILE%", 1) != 0;
+    resolved = cbm_workspace_home_dir();
+    failures += !resolved || strcmp(home, resolved) != 0;
+    failures += cbm_workspace_classify_root(home, resolved, cache) != CBM_WS_DENY_SENSITIVE;
+    failures += cbm_setenv("HOME", cache, 1) != 0;
+    resolved = cbm_workspace_home_dir();
+    char normalized_cache[4096];
+    snprintf(normalized_cache, sizeof(normalized_cache), "%s", cache);
+    cbm_normalize_path_sep(normalized_cache);
+    failures += !resolved || strcmp(normalized_cache, resolved) != 0;
+    failures += cbm_setenv("HOME", home, 1) != 0;
+    resolved = cbm_workspace_home_dir();
+    char err[1024];
+    failures += cbm_workspace_grant_add(cache, resolved, home, false, err, sizeof(err));
+    /* Containment resolves real paths; its approval control needs an existing,
+     * fixture-owned
+     * home rather than the synthetic boundary strings above. */
+    char actual_home[1024];
+    snprintf(actual_home, sizeof(actual_home), "%s/approval-home", cache);
+    cbm_normalize_path_sep(actual_home);
+    failures += !cbm_mkdir_p(actual_home, 0700);
+    failures += cbm_setenv("HOME", actual_home, 1) != 0;
+    resolved = cbm_workspace_home_dir();
+    failures += !cbm_workspace_grant_add(cache, resolved, actual_home, true, err, sizeof(err));
+    failures += !cbm_workspace_root_allowed(actual_home, resolved, cache, NULL, err, sizeof(err));
+    for (int i = 0; i < 3; i++) {
+        if (saved[i])
+            (void)cbm_setenv(names[i], saved[i], 1);
+        else
+            (void)cbm_unsetenv(names[i]);
+        free(saved[i]);
+    }
+    th_cleanup(cache);
+    ASSERT_EQ(failures, 0);
+    PASS();
+}
+
 SUITE(workspace) {
+    RUN_TEST(ws_environment_home_identity_boundaries);
     RUN_TEST(ws_manifest_absent_is_not_an_error);
     RUN_TEST(ws_manifest_parses_entries_and_skips_comments);
     RUN_TEST(ws_manifest_rejects_control_characters);

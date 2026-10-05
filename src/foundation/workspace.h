@@ -21,6 +21,7 @@
  * home_dir and cache_dir are passed in rather than read from the environment so
  * the policy is a pure function and can be tested without touching the host.
  * Either may be NULL, which disables the checks that depend on it.
+ * An empty home_dir denotes an unresolved identity error and denies all roots.
  */
 
 typedef enum {
@@ -33,6 +34,8 @@ typedef enum {
     /* The home directory itself, or a credential/system directory. Overridable
      * by an explicit human action, never by a manifest or a tool call. */
     CBM_WS_DENY_SENSITIVE,
+    /* Home identity could not be read completely. Never overridable. */
+    CBM_WS_DENY_HOME_UNAVAILABLE,
 } cbm_ws_verdict_t;
 
 /* Classify canonical_path as a candidate indexing root. */
@@ -100,7 +103,8 @@ bool cbm_workspace_root_allowed(const char *canonical_path, const char *home_dir
 
 /* The home and cache directories the policy should be evaluated against. Shared
  * so two callers cannot derive them differently and reach different verdicts for
- * the same path. Either may return NULL. */
+ * the same path. Either may return NULL. An empty home signals a read/overflow
+ * failure and must be passed through to policy so it fails closed. */
 const char *cbm_workspace_home_dir(void);
 const char *cbm_workspace_cache_dir(void);
 

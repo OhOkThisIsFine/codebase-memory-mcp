@@ -2,6 +2,7 @@
  * test_platform.c — RED phase tests for foundation/platform.
  */
 #include "test_framework.h"
+#include "test_helpers.h"
 #include "../src/foundation/compat.h" /* cbm_setenv / cbm_unsetenv (Windows-portable) */
 #include "../src/foundation/compat_fs.h"
 #include "../src/foundation/constants.h"
@@ -52,8 +53,7 @@ TEST(platform_file_apis_survive_max_path_overflow) {
     ASSERT_NOT_NULL(cbm_mkdtemp(base));
 
     enum { LONG_SEGMENTS = 5 };
-    static const char segment[] =
-        "segment-abcdefghijklmnopqrstuvwxyz0123456789-abcdefghijklmnop";
+    static const char segment[] = "segment-abcdefghijklmnopqrstuvwxyz0123456789-abcdefghijklmnop";
     char deep[CBM_SZ_1K];
     written = snprintf(deep, sizeof(deep), "%s", base);
     ASSERT_TRUE(written > 0 && written < (int)sizeof(deep));
@@ -346,7 +346,11 @@ TEST(platform_path_helpers_use_per_thread_storage) {
     const char *saved_cache = getenv("CBM_CACHE_DIR");
     char *saved_home_copy = saved_home ? strdup(saved_home) : NULL;
     char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+#ifdef _WIN32
+    ASSERT_EQ(cbm_setenv("HOME", "C:/fixture/cbm-platform-thread-home", 1), 0);
+#else
     ASSERT_EQ(cbm_setenv("HOME", "/tmp/cbm-platform-thread-home", 1), 0);
+#endif
     ASSERT_EQ(cbm_setenv("CBM_CACHE_DIR", "/tmp/cbm-platform-thread-cache", 1), 0);
 
     atomic_int ready;
@@ -485,9 +489,15 @@ TEST(platform_home_dir_rejects_unexpanded_token) {
     ASSERT_TRUE(token_rejected);
     ASSERT_TRUE(relative_rejected);
     ASSERT_TRUE(tilde_rejected);
-    ASSERT_TRUE(posix_accepted);
+#ifdef _WIN32
+    ASSERT_FALSE(posix_accepted);
     ASSERT_TRUE(drive_accepted);
     ASSERT_TRUE(unc_accepted);
+#else
+    ASSERT_TRUE(posix_accepted);
+    ASSERT_FALSE(drive_accepted);
+    ASSERT_FALSE(unc_accepted);
+#endif
     /* No literal token may survive into a resolved path, and whatever is
      * returned must be absolute so it cannot be rooted at the cwd. */
     ASSERT_NULL(strstr(resolved_home_copy, "%USERPROFILE%"));
@@ -508,46 +518,130 @@ TEST(platform_home_dir_rejects_unexpanded_token) {
  * that an accepted home always produces a cwd-independent cache path by
  * resolving from a cwd that is NOT the home directory. */
 TEST(platform_cache_dir_is_absolute_for_accepted_home) {
-    const char *saved_home = getenv("HOME");
-    const char *saved_cache = getenv("CBM_CACHE_DIR");
-    char *home_copy = saved_home ? strdup(saved_home) : NULL;
-    char *cache_copy = saved_cache ? strdup(saved_cache) : NULL;
-    char saved_cwd[CBM_SZ_1K] = "";
-    bool cwd_saved = platform_test_getcwd(saved_cwd, sizeof(saved_cwd)) != NULL;
+    const char *names[] = {"HOME", "USERPROFILE", "CBM_CACHE_DIR"};
+    char *saved[3];
+    for (int i = 0; i < 3; i++) {
+        const char *v = getenv(names[i]);
+        saved[i] = v ? strdup(v) : NULL;
+    }
+    char cwd[4096];
+    ASSERT_NOT_NULL(platform_test_getcwd(cwd, sizeof(cwd)));
+    char *base = th_mktempdir("cbm-home-cwd");
+    ASSERT_NOT_NULL(base);
+    cbm_normalize_path_sep(base);
+    char dirs[2][1024], home[1024], first[4096] = "";
+    snprintf(home, sizeof(home), "%s/home", base);
+    int failures = 0;
+    failures += cbm_setenv("HOME", home, 1) != 0;
+    failures += cbm_unsetenv("USERPROFILE") != 0;
+    failures += cbm_unsetenv("CBM_CACHE_DIR") != 0;
+    for (int i = 0; i < 2; i++) {
+        snprintf(dirs[i], sizeof(dirs[i]), "%s/cwd%d", base, i);
+        failures += !cbm_mkdir_p(dirs[i], 0700);
+        int moved = platform_test_chdir(dirs[i]);
+        failures += moved != 0;
+        if (moved != 0)
+            break;
+        const char *cache = cbm_resolve_cache_dir();
+        failures += !cache || !cbm_home_dir_value_usable(cache);
+        if (cache) {
+            if (!i)
+                snprintf(first, sizeof(first), "%s", cache);
+            else
+                failures += strcmp(first, cache) != 0;
+            failures += !cbm_mkdir_p(cache, 0700);
+            failures += !cbm_is_dir(first);
+        }
+        failures += cbm_setenv("HOME", "%USERPROFILE%", 1) != 0;
+        failures += cbm_setenv("USERPROFILE", home, 1) != 0;
+        cache = cbm_resolve_cache_dir();
+        failures += !cache || strcmp(first, cache) != 0;
+        failures += cbm_unsetenv("USERPROFILE") != 0;
+        failures += cbm_resolve_cache_dir() != NULL;
+        failures += cbm_setenv("HOME", home, 1) != 0;
+    }
+    failures += platform_test_chdir(cwd) != 0;
+    for (int i = 0; i < 3; i++) {
+        if (saved[i])
+            (void)cbm_setenv(names[i], saved[i], 1);
+        else
+            (void)cbm_unsetenv(names[i]);
+        free(saved[i]);
+    }
+    th_cleanup(base);
+    ASSERT_EQ(failures, 0);
+    PASS();
+}
 
-    /* CBM_CACHE_DIR outranks the home directory; clear it so this exercises
-     * the home-derived branch rather than an inherited override. */
-    (void)cbm_unsetenv("CBM_CACHE_DIR");
-    ASSERT_EQ(cbm_setenv("HOME", "/tmp/cbm-absolute-home-check", 1), 0);
-    /* Park the process in a cwd far from the fake home, so a relative join
-     * would visibly diverge from the expected absolute result. Restore before
-     * any assertion, since the framework exits the test on failure. */
-    if (cwd_saved) {
-        (void)platform_test_chdir("/");
+TEST(platform_home_native_syntax_and_precedence) {
+    const char *names[] = {"HOME", "USERPROFILE", "CBM_CACHE_DIR"};
+    char *saved[3];
+    for (int i = 0; i < 3; i++) {
+        const char *v = getenv(names[i]);
+        saved[i] = v ? strdup(v) : NULL;
     }
-    const char *resolved = cbm_resolve_cache_dir();
-    char resolved_copy[CBM_SZ_1K];
-    snprintf(resolved_copy, sizeof(resolved_copy), "%s", resolved ? resolved : "");
-    if (cwd_saved) {
-        (void)platform_test_chdir(saved_cwd);
+    char *base = th_mktempdir("cbm-home-precedence");
+    ASSERT_NOT_NULL(base);
+    cbm_normalize_path_sep(base);
+    char home[1024], profile[1024], cache[1024];
+    snprintf(home, sizeof(home), "%s/home", base);
+    snprintf(profile, sizeof(profile), "%s/profile", base);
+    snprintf(cache, sizeof(cache), "%s/cache", base);
+    const char *invalid[] = {"", "%USERPROFILE%", "~", "./relative", "C:relative", "\\root"};
+    int failures = 0;
+    failures += cbm_setenv("USERPROFILE", profile, 1) != 0;
+    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); i++) {
+        failures += cbm_setenv("HOME", invalid[i], 1) != 0;
+        const char *resolved = cbm_get_home_dir();
+        failures += !resolved || strcmp(resolved, profile) != 0;
     }
-
-    if (home_copy) {
-        (void)cbm_setenv("HOME", home_copy, 1);
-    } else {
-        (void)cbm_unsetenv("HOME");
+    failures += cbm_unsetenv("HOME") != 0;
+    const char *resolved = cbm_get_home_dir();
+    failures += !resolved || strcmp(resolved, profile) != 0;
+    failures += cbm_setenv("HOME", home, 1) != 0;
+    resolved = cbm_get_home_dir();
+    failures += !resolved || strcmp(resolved, home) != 0;
+    failures += cbm_setenv("CBM_CACHE_DIR", cache, 1) != 0;
+    resolved = cbm_resolve_cache_dir();
+    failures += !resolved || strcmp(resolved, cache) != 0;
+#ifndef _WIN32
+    failures += cbm_setenv("HOME", "/fixture/home\\literal", 1) != 0;
+    resolved = cbm_get_home_dir();
+    failures += !resolved || strcmp(resolved, "/fixture/home\\literal") != 0;
+#endif
+    char oversized[5001];
+    memset(oversized, 'a', sizeof(oversized) - 1);
+    oversized[sizeof(oversized) - 1] = '\0';
+    failures += cbm_setenv("HOME", oversized, 1) != 0;
+    failures += cbm_get_home_dir() != NULL; /* no different-identity fallback */
+    failures += cbm_setenv("HOME", "", 1) != 0;
+    failures += cbm_unsetenv("USERPROFILE") != 0;
+    failures += cbm_get_home_dir() != NULL;
+    for (int i = 0; i < 3; i++) {
+        if (saved[i])
+            (void)cbm_setenv(names[i], saved[i], 1);
+        else
+            (void)cbm_unsetenv(names[i]);
+        free(saved[i]);
     }
-    if (cache_copy) {
-        (void)cbm_setenv("CBM_CACHE_DIR", cache_copy, 1);
-    } else {
-        (void)cbm_unsetenv("CBM_CACHE_DIR");
-    }
-    free(home_copy);
-    free(cache_copy);
-
-    ASSERT_STR_EQ(resolved_copy, "/tmp/cbm-absolute-home-check/.cache/codebase-memory-mcp");
-    ASSERT_TRUE(resolved_copy[0] == '/');
-    ASSERT_NULL(strstr(resolved_copy, "%USERPROFILE%"));
+    th_cleanup(base);
+    ASSERT_EQ(failures, 0);
+    ASSERT_FALSE(cbm_home_dir_value_usable(NULL));
+    ASSERT_FALSE(cbm_home_dir_value_usable("C:foo"));
+    ASSERT_FALSE(cbm_home_dir_value_usable("\\root"));
+#ifdef _WIN32
+    ASSERT_FALSE(cbm_home_dir_value_usable("/root"));
+    ASSERT_FALSE(cbm_home_dir_value_usable("//server"));
+    ASSERT_FALSE(cbm_home_dir_value_usable("//server/"));
+    ASSERT_FALSE(cbm_home_dir_value_usable("//server//share"));
+    ASSERT_FALSE(cbm_home_dir_value_usable("\\\\?\\C:\\home"));
+    ASSERT_TRUE(cbm_home_dir_value_usable("C:/home"));
+    ASSERT_TRUE(cbm_home_dir_value_usable("\\\\server\\share\\home"));
+#else
+    ASSERT_FALSE(cbm_home_dir_value_usable("C:/home"));
+    ASSERT_FALSE(cbm_home_dir_value_usable("\\\\server\\share"));
+    ASSERT_TRUE(cbm_home_dir_value_usable("/fixture/home"));
+#endif
     PASS();
 }
 
@@ -612,9 +706,9 @@ TEST(platform_cache_dir_from_non_home_cwd_never_contains_token) {
     /* ...and if anything is resolved it must be absolute, so mkdir cannot
      * anchor it at the cwd the hook happened to be launched from. */
     if (resolved_copy[0]) {
-        ASSERT_TRUE(resolved_copy[0] == '/' ||
-                    (resolved_copy[1] == ':' &&
-                     (resolved_copy[2] == '/' || resolved_copy[2] == '\\')));
+        ASSERT_TRUE(
+            resolved_copy[0] == '/' ||
+            (resolved_copy[1] == ':' && (resolved_copy[2] == '/' || resolved_copy[2] == '\\')));
         ASSERT_NULL(strstr(resolved_copy, probe_cwd));
     }
     (void)have_probe;
@@ -886,6 +980,7 @@ TEST(cgroup_no_mem_files) {
 #endif /* __linux__ */
 
 SUITE(platform) {
+    RUN_TEST(platform_home_native_syntax_and_precedence);
     RUN_TEST(platform_file_apis_survive_max_path_overflow);
     RUN_TEST(platform_mkstemp_and_mkdtemp_survive_non_ascii_directory);
     RUN_TEST(platform_mkdtemp_is_thread_safe);

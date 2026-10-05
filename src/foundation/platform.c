@@ -393,6 +393,9 @@ const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const ch
                 if (environment_error == ERROR_ENVVAR_NOT_FOUND) {
                     return fallback ? platform_copy_environment_value(buf, buf_sz, fallback) : NULL;
                 }
+                if (environment_error != ERROR_SUCCESS) {
+                    return NULL;
+                }
                 /* An existing empty variable is distinct from a missing one. */
                 return buf;
             }
@@ -454,37 +457,63 @@ bool cbm_home_dir_value_usable(const char *value) {
     if (!value || !value[0] || value[0] == '%' || value[0] == '~') {
         return false;
     }
-    /* Absolute POSIX path, a Windows drive/UNC root ("C:/x", "//server/share",
-     * "\\server\share"), or a drive-rooted path ("\x"). Anything else is relative
-     * to the cwd and must not become a cache parent. */
-    if (value[0] == '/' || value[0] == '\\') {
+#ifdef _WIN32
+    bool drive_letter =
+        (value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z');
+    if (drive_letter && value[1] == ':' && (value[2] == '/' || value[2] == '\\')) {
         return true;
     }
-    bool drive_letter = (value[0] >= 'a' && value[0] <= 'z') ||
-                        (value[0] >= 'A' && value[0] <= 'Z');
-    return drive_letter && value[1] == ':' && (value[2] == '/' || value[2] == '\\');
+    /* UNC requires both a server and share. Root-relative paths depend on
+     * the current drive. Device namespaces are not home identities. */
+    if (!((value[0] == '/' && value[1] == '/') || (value[0] == '\\' && value[1] == '\\'))) {
+        return false;
+    }
+    const char *server = value + 2;
+    if (!server[0] || server[0] == '/' || server[0] == '\\' || server[0] == '?' ||
+        server[0] == '.') {
+        return false;
+    }
+    const char *share = server;
+    while (*share && *share != '/' && *share != '\\')
+        share++;
+    if (!*share)
+        return false;
+    share++;
+    const char *end = share;
+    while (*end && *end != '/' && *end != '\\')
+        end++;
+    size_t length = (size_t)(end - share);
+    return length > 0 && !(length == 1 && share[0] == '.') &&
+           !(length == 2 && share[0] == '.' && share[1] == '.');
+#else
+    return value[0] == '/';
+#endif
+}
+
+const char *cbm_get_home_dir_checked(bool *read_failed) {
+    static CBM_TLS char buf[CBM_SZ_4K];
+    const char *names[] = {"HOME", "USERPROFILE"};
+    *read_failed = false;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        /* Empty fallback distinguishes absence from overflow/read failure.
+         * A failed higher-priority read must not select a different identity. */
+        if (!cbm_safe_getenv(names[i], buf, sizeof(buf), "")) {
+            *read_failed = true;
+            return NULL;
+        }
+        if (cbm_home_dir_value_usable(buf)) {
+#ifdef _WIN32
+            cbm_normalize_path_sep(buf);
+#endif
+            return buf;
+        }
+    }
+    return NULL;
 }
 
 const char *cbm_get_home_dir(void) {
-    static CBM_TLS char buf[CBM_SZ_1K];
-    char tmp[CBM_SZ_256] = "";
-
-    /* HOME can be present but unusable; keep probing rather than accepting it,
-     * so an exported literal token does not mask a valid USERPROFILE. */
-    cbm_safe_getenv("HOME", tmp, sizeof(tmp), NULL);
-    if (cbm_home_dir_value_usable(tmp)) {
-        snprintf(buf, sizeof(buf), "%s", tmp);
-        cbm_normalize_path_sep(buf);
-        return buf;
-    }
-
-    cbm_safe_getenv("USERPROFILE", tmp, sizeof(tmp), NULL);
-    if (cbm_home_dir_value_usable(tmp)) {
-        snprintf(buf, sizeof(buf), "%s", tmp);
-        cbm_normalize_path_sep(buf);
-        return buf;
-    }
-    return NULL;
+    bool read_failed;
+    return cbm_get_home_dir_checked(&read_failed);
 }
 
 /* ── App config directories (cross-platform) ────────── */
