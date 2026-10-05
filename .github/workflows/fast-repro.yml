@@ -1,4 +1,4 @@
-name: PR1 Native Quiet Probe
+name: PR1 Native Startup Probe
 on:
   workflow_dispatch:
 permissions:
@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 5eb8e04eb4c815e2dab63adaac046412ce240acc
+          ref: ${{ github.sha }}
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
         with:
           msystem: ${{ matrix.msystem }}
@@ -39,25 +39,12 @@ jobs:
         run: |
           $root = & scripts/ci/new-protected-temp-root.ps1 -Prefix 'cbm-pr1-quiet-' -ProtectDir (Join-Path $env:GITHUB_WORKSPACE "build\c")
           "CBM_CI_TEMP_ROOT=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
-        with:
-          path: ${{ github.workspace }}/.ccache
-          key: quiet-probe-${{ matrix.os }}-${{ github.sha }}
-          restore-keys: |
-            ccache-test-${{ matrix.os }}-${{ matrix.msystem }}-
-      - name: Unchanged source, deadlines and assertions; three quiet trials
+      - name: Compare hidden owned startup with and without Job Object / process group
         shell: msys2 {0}
-        env:
-          CCACHE_DIR: ${{ github.workspace }}/.ccache
-          CCACHE_MAXSIZE: 1500M
         run: |
           export TEMP="$(cygpath -m "$CBM_CI_TEMP_ROOT")" TMPDIR="$(cygpath -u "$CBM_CI_TEMP_ROOT")"
           export TMP="$TEMP"
           git rev-parse HEAD
-          status=0
-          scripts/test.sh --suites index_format,subprocess CC=clang CXX=clang++ || status=1
-          for trial in 2 3; do
-            echo "quiet trial=$trial"
-            build/c/test-runner.exe index_format subprocess || status=1
-          done
-          exit "$status"
+          clang --version
+          clang -std=c11 -Wall -Wextra -Werror tests/native-startup-probe.c -o build/c/native-startup-probe.exe
+          build/c/native-startup-probe.exe
