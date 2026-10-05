@@ -7628,7 +7628,7 @@ static bool prepare_config_parent(const char *path) {
     if (!path || !path[0]) {
         return false;
     }
-    char parent[CLI_BUF_1K];
+    char parent[CLI_BUF_4K];
     int written = snprintf(parent, sizeof(parent), "%s", path);
     if (written < 0 || (size_t)written >= sizeof(parent)) {
         return false;
@@ -8967,10 +8967,36 @@ static void install_cli_agent_configs(const cbm_detected_agents_t *agents, const
 /* Scan Code/User/profiles/ and install (or plan) a per-profile mcp.json for
  * each existing profile subdirectory, so VS Code profile users inherit the MCP
  * server without manual steps (#431). No-op when profiles/ is absent. */
+static bool vscode_config_join(char *out, size_t capacity, const char *base, const char *suffix,
+                               bool uninstalling) {
+    if (base && base[0]) {
+        int written = snprintf(out, capacity, "%s/%s", base, suffix);
+        if (written >= 0 && (size_t)written < capacity) {
+            return true;
+        }
+    }
+    out[0] = '\0';
+    record_agent_config_error_with_reason(uninstalling, "VS Code", "config_path", base,
+                                          "directory unavailable or path too long");
+    return false;
+}
+
+static bool vscode_user_dir(char *out, size_t capacity, const char *home, bool uninstalling) {
+#ifdef __APPLE__
+    return vscode_config_join(out, capacity, home, "Library/Application Support/Code/User",
+                              uninstalling);
+#else
+    (void)home;
+    return vscode_config_join(out, capacity, cbm_app_config_dir(), "Code/User", uninstalling);
+#endif
+}
+
 static void install_vscode_profile_configs(const char *code_user, const char *binary_path,
                                            bool dry_run) {
-    char profiles_dir[CLI_BUF_1K];
-    snprintf(profiles_dir, sizeof(profiles_dir), "%s/profiles", code_user);
+    char profiles_dir[CLI_BUF_4K];
+    if (!vscode_config_join(profiles_dir, sizeof(profiles_dir), code_user, "profiles", false)) {
+        return;
+    }
     cbm_dir_t *d = cbm_opendir(profiles_dir);
     if (!d) {
         return;
@@ -8980,14 +9006,19 @@ static void install_vscode_profile_configs(const char *code_user, const char *bi
         if (strcmp(ent->name, ".") == 0 || strcmp(ent->name, "..") == 0) {
             continue;
         }
-        char profile_path[CLI_BUF_1K];
-        snprintf(profile_path, sizeof(profile_path), "%s/%s", profiles_dir, ent->name);
+        char profile_path[CLI_BUF_4K];
+        if (!vscode_config_join(profile_path, sizeof(profile_path), profiles_dir, ent->name,
+                                false)) {
+            continue;
+        }
         struct stat st;
         if (stat(profile_path, &st) != 0 || !S_ISDIR(st.st_mode)) {
             continue;
         }
-        char cp[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/mcp.json", profile_path);
+        char cp[CLI_BUF_4K];
+        if (!vscode_config_join(cp, sizeof(cp), profile_path, "mcp.json", false)) {
+            continue;
+        }
         install_generic_agent_config("VS Code", binary_path, cp, NULL, dry_run,
                                      cbm_install_vscode_mcp);
     }
@@ -8996,8 +9027,10 @@ static void install_vscode_profile_configs(const char *code_user, const char *bi
 
 static void uninstall_vscode_profile_configs(const char *code_user, const char *binary_path,
                                              bool dry_run) {
-    char profiles_dir[CLI_BUF_1K];
-    snprintf(profiles_dir, sizeof(profiles_dir), "%s/profiles", code_user);
+    char profiles_dir[CLI_BUF_4K];
+    if (!vscode_config_join(profiles_dir, sizeof(profiles_dir), code_user, "profiles", true)) {
+        return;
+    }
     cbm_dir_t *directory = cbm_opendir(profiles_dir);
     if (!directory) {
         return;
@@ -9007,14 +9040,19 @@ static void uninstall_vscode_profile_configs(const char *code_user, const char *
         if (strcmp(entry->name, ".") == 0 || strcmp(entry->name, "..") == 0) {
             continue;
         }
-        char profile_dir[CLI_BUF_1K];
-        snprintf(profile_dir, sizeof(profile_dir), "%s/%s", profiles_dir, entry->name);
+        char profile_dir[CLI_BUF_4K];
+        if (!vscode_config_join(profile_dir, sizeof(profile_dir), profiles_dir, entry->name,
+                                true)) {
+            continue;
+        }
         struct stat state;
         if (stat(profile_dir, &state) != 0 || !S_ISDIR(state.st_mode)) {
             continue;
         }
-        char config_path[CLI_BUF_1K];
-        snprintf(config_path, sizeof(config_path), "%s/mcp.json", profile_dir);
+        char config_path[CLI_BUF_4K];
+        if (!vscode_config_join(config_path, sizeof(config_path), profile_dir, "mcp.json", true)) {
+            continue;
+        }
         if (!dry_run && cbm_remove_vscode_mcp_owned(binary_path, config_path) != CLI_OK) {
             record_agent_config_error(true, "VS Code", "profile_mcp_uninstall", config_path);
         }
@@ -9094,21 +9132,18 @@ static void install_editor_agent_configs(const cbm_detected_agents_t *agents, co
         }
     }
     if (agents->vscode) {
-        char code_user[CLI_BUF_1K];
-#ifdef __APPLE__
-        snprintf(code_user, sizeof(code_user), "%s/Library/Application Support/Code/User", home);
-#else
-        snprintf(code_user, sizeof(code_user), "%s/Code/User", cbm_app_config_dir());
-#endif
-        char cp[CLI_BUF_1K];
-        snprintf(cp, sizeof(cp), "%s/mcp.json", code_user);
-        install_generic_agent_config("VS Code", binary_path, cp, NULL, dry_run,
-                                     cbm_install_vscode_mcp);
-        /* VS Code profiles each keep their own settings under
-         * Code/User/profiles/<id>/. The default mcp.json above does NOT apply
-         * to a named profile, so write/plan a per-profile mcp.json for every
-         * existing profile directory (#431). */
-        install_vscode_profile_configs(code_user, binary_path, dry_run);
+        char code_user[CLI_BUF_4K];
+        char cp[CLI_BUF_4K];
+        if (vscode_user_dir(code_user, sizeof(code_user), home, false) &&
+            vscode_config_join(cp, sizeof(cp), code_user, "mcp.json", false)) {
+            install_generic_agent_config("VS Code", binary_path, cp, NULL, dry_run,
+                                         cbm_install_vscode_mcp);
+            /* VS Code profiles each keep their own settings under
+             * Code/User/profiles/<id>/. The default mcp.json above does NOT apply
+             * to a named profile, so write/plan a per-profile mcp.json for every
+             * existing profile directory (#431). */
+            install_vscode_profile_configs(code_user, binary_path, dry_run);
+        }
     }
     if (agents->cursor) {
         char cp[CLI_BUF_1K];
@@ -11332,17 +11367,14 @@ static void uninstall_editor_agents(const cbm_detected_agents_t *agents, const c
         printf("KiloCode: removed MCP config + instruction reference\n");
     }
     if (agents->vscode) {
-        char code_user[CLI_BUF_1K];
-        char cp[CLI_BUF_1K];
-#ifdef __APPLE__
-        snprintf(code_user, sizeof(code_user), "%s/Library/Application Support/Code/User", home);
-#else
-        snprintf(code_user, sizeof(code_user), "%s/Code/User", cbm_app_config_dir());
-#endif
-        snprintf(cp, sizeof(cp), "%s/mcp.json", code_user);
-        uninstall_agent_mcp_instr((mcp_uninstall_args_t){"VS Code", cp, NULL}, dry_run,
-                                  cbm_remove_vscode_mcp_owned);
-        uninstall_vscode_profile_configs(code_user, installed_binary, dry_run);
+        char code_user[CLI_BUF_4K];
+        char cp[CLI_BUF_4K];
+        if (vscode_user_dir(code_user, sizeof(code_user), home, true) &&
+            vscode_config_join(cp, sizeof(cp), code_user, "mcp.json", true)) {
+            uninstall_agent_mcp_instr((mcp_uninstall_args_t){"VS Code", cp, NULL}, dry_run,
+                                      cbm_remove_vscode_mcp_owned);
+            uninstall_vscode_profile_configs(code_user, installed_binary, dry_run);
+        }
     }
     if (agents->cursor) {
         char cp[CLI_BUF_1K];

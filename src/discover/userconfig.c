@@ -317,6 +317,24 @@ static int load_config_file(const char *path, cbm_userext_t **entries, int *coun
 
 /* ── Public API ──────────────────────────────────────────────────── */
 
+static char *config_path_join(const char *base, const char *suffix) {
+    if (!base || !base[0]) {
+        return NULL;
+    }
+    size_t base_len = strlen(base);
+    size_t suffix_len = strlen(suffix);
+    if (base_len > SIZE_MAX - suffix_len - 2) {
+        return NULL;
+    }
+    char *path = malloc(base_len + suffix_len + 2);
+    if (path) {
+        memcpy(path, base, base_len);
+        path[base_len] = '/';
+        memcpy(path + base_len + 1, suffix, suffix_len + 1);
+    }
+    return path;
+}
+
 cbm_userconfig_t *cbm_userconfig_load(const char *repo_path) {
     cbm_userconfig_t *cfg = calloc(CBM_ALLOC_ONE, sizeof(cbm_userconfig_t));
     if (!cfg) {
@@ -327,13 +345,15 @@ cbm_userconfig_t *cbm_userconfig_load(const char *repo_path) {
     int count = 0;
 
     /* ── Step 1: Load global config ── */
-    enum { PATH_BUF_SZ = 1280 };
     const char *cfg_base = cbm_app_config_dir();
-    const char *cfg_fallback = cfg_base ? cfg_base : "/tmp";
-    char global_path[PATH_BUF_SZ];
-    snprintf(global_path, sizeof(global_path), "%s/codebase-memory-mcp/config.json", cfg_fallback);
-
-    if (load_config_file(global_path, &entries, &count, cfg->global_source_sha256) != 0) {
+    char *global_path = config_path_join(cfg_base, "codebase-memory-mcp/config.json");
+    if (!global_path) {
+        free(cfg);
+        return NULL;
+    }
+    int global_rc = load_config_file(global_path, &entries, &count, cfg->global_source_sha256);
+    free(global_path);
+    if (global_rc != 0) {
         for (int i = 0; i < count; i++) {
             free(entries[i].ext);
         }
@@ -347,10 +367,12 @@ cbm_userconfig_t *cbm_userconfig_load(const char *repo_path) {
     /* ── Step 2: Load project config ── */
     userconfig_source_digest("not-applicable", NULL, 0, cfg->project_source_sha256);
     if (repo_path && repo_path[0]) {
-        char project_path[PATH_BUF_SZ];
-        snprintf(project_path, sizeof(project_path), "%s/.codebase-memory.json", repo_path);
-
-        if (load_config_file(project_path, &entries, &count, cfg->project_source_sha256) != 0) {
+        char *project_path = config_path_join(repo_path, ".codebase-memory.json");
+        int project_rc = project_path ? load_config_file(project_path, &entries, &count,
+                                                         cfg->project_source_sha256)
+                                      : CBM_NOT_FOUND;
+        free(project_path);
+        if (project_rc != 0) {
             /* Free already-allocated entries */
             for (int i = 0; i < count; i++) {
                 free(entries[i].ext);

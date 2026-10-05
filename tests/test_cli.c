@@ -3433,6 +3433,44 @@ TEST(cli_vscode_mcp_uninstall) {
     PASS();
 }
 
+TEST(cli_vscode_unavailable_config_directory) {
+#ifdef __APPLE__
+    SKIP_PLATFORM("macOS VS Code uses HOME rather than XDG_CONFIG_HOME");
+#else
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-vscode-unavailable-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmpdir));
+    char code_user[640];
+#ifdef _WIN32
+    const char *variable = "APPDATA";
+    snprintf(code_user, sizeof(code_user), "%s/AppData/Roaming/Code/User", tmpdir);
+#else
+    const char *variable = "XDG_CONFIG_HOME";
+    snprintf(code_user, sizeof(code_user), "%s/.config/Code/User", tmpdir);
+#endif
+    test_mkdirp(code_user);
+    char *saved_home = save_test_env("HOME");
+    char *saved_path = save_test_env("PATH");
+    char *saved_config = save_test_env(variable);
+    char oversized[4097];
+    memset(oversized, 'x', sizeof(oversized) - 1);
+    oversized[sizeof(oversized) - 1] = '\0';
+    cbm_setenv("HOME", tmpdir, 1);
+    cbm_setenv("PATH", tmpdir, 1);
+    cbm_setenv(variable, oversized, 1);
+    int install_rc = cbm_install_agent_configs(tmpdir, "/fixture/codebase-memory-mcp", false, true);
+    char *argv[] = {"uninstall", "--yes", "--dry-run"};
+    int uninstall_rc = cli_test_cmd_uninstall(3, argv);
+    restore_test_env("HOME", saved_home);
+    restore_test_env("PATH", saved_path);
+    restore_test_env(variable, saved_config);
+    test_rmdir_r(tmpdir);
+    ASSERT_NEQ(install_rc, 0);
+    ASSERT_NEQ(uninstall_rc, 0);
+    PASS();
+#endif
+}
+
 TEST(cli_vscode_profile_mcp_uninstall) {
     char tmpdir[256];
     snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-vscode-profile-uninstall-XXXXXX");
@@ -13884,6 +13922,7 @@ SUITE(cli) {
     RUN_TEST(cli_vscode_mcp_install);
     RUN_TEST(cli_vscode_mcp_uninstall);
     RUN_TEST(cli_vscode_profile_mcp_uninstall);
+    RUN_TEST(cli_vscode_unavailable_config_directory);
 
     /* Zed MCP (3 tests — install_test.go) */
     RUN_TEST(cli_zed_mcp_install);
