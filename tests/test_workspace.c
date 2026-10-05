@@ -253,6 +253,56 @@ TEST(ws_posix_matching_is_case_sensitive) {
     PASS();
 }
 
+TEST(ws_home_identity_native_separator_semantics) {
+#ifdef _WIN32
+    ASSERT_EQ(cbm_workspace_classify_root("C:\\Users\\Dev", "c:/Users/Dev", NULL),
+              CBM_WS_DENY_SENSITIVE);
+    ASSERT_EQ(cbm_workspace_classify_root("C:/Users/Dev", "C:\\Users\\Dev", NULL),
+              CBM_WS_DENY_SENSITIVE);
+    ASSERT_EQ(cbm_workspace_classify_root("\\\\server\\share\\Users\\Dev",
+                                          "//server/share/Users/Dev", NULL),
+              CBM_WS_DENY_SENSITIVE);
+    ASSERT_EQ(cbm_workspace_classify_root("C:\\Users\\Developer", "C:/Users/Dev", NULL),
+              CBM_WS_ALLOW);
+#else
+    ASSERT_EQ(cbm_workspace_classify_root("/fixture/home\\literal", "/fixture/home/literal", NULL),
+              CBM_WS_ALLOW);
+    ASSERT_EQ(cbm_workspace_classify_root("/fixture/home", "/fixture/home\\", NULL), CBM_WS_ALLOW);
+    ASSERT_EQ(cbm_workspace_classify_root("/fixture/home", NULL, "/fixture/home\\cache"),
+              CBM_WS_ALLOW);
+    ASSERT_EQ(cbm_workspace_classify_root("/fixture/home\\literal", "/fixture/home\\literal", NULL),
+              CBM_WS_DENY_SENSITIVE);
+#endif
+    PASS();
+}
+
+#ifdef _WIN32
+TEST(ws_native_home_sensitive_grant_matches_canonical_backslashes) {
+    char *root = th_mktempdir("cbm-home-native");
+    char *cache = th_mktempdir("cbm-home-native-cache");
+    ASSERT_NOT_NULL(root);
+    ASSERT_NOT_NULL(cache);
+    char canonical[4096], normalized[4096], err[1024], listed[8192], expected[8192];
+    ASSERT_TRUE(cbm_canonical_path(root, canonical, sizeof(canonical)));
+    snprintf(normalized, sizeof(normalized), "%s", canonical);
+    cbm_normalize_path_sep(normalized);
+    ASSERT_NOT_NULL(strchr(canonical, '\\'));
+    ASSERT_EQ(cbm_workspace_classify_root(canonical, normalized, cache), CBM_WS_DENY_SENSITIVE);
+    ASSERT_FALSE(
+        cbm_workspace_root_allowed(canonical, normalized, cache, normalized, err, sizeof(err)));
+    ASSERT_FALSE(cbm_workspace_grant_add(cache, normalized, canonical, false, err, sizeof(err)));
+    ASSERT_TRUE(cbm_workspace_grant_add(cache, normalized, normalized, true, err, sizeof(err)));
+    ASSERT_TRUE(cbm_workspace_root_allowed(canonical, normalized, cache, NULL, err, sizeof(err)));
+    ASSERT_TRUE(cbm_workspace_grant_add(cache, normalized, canonical, true, err, sizeof(err)));
+    ASSERT_TRUE(cbm_workspace_grant_list(cache, listed, sizeof(listed)));
+    snprintf(expected, sizeof(expected), "(approved) %s\n", normalized);
+    ASSERT_STR_EQ(listed, expected);
+    th_cleanup(root);
+    th_cleanup(cache);
+    PASS();
+}
+#endif
+
 /* Absent injected context, the checks that depend on it simply do not fire —
  * they must not crash or deny everything. */
 TEST(ws_null_context_disables_dependent_checks) {
@@ -497,6 +547,10 @@ SUITE(workspace) {
     RUN_TEST(ws_sensitive_approval_upgrades_existing_ordinary_exact_grant);
     RUN_TEST(ws_sensitive_approval_adds_exact_exception_under_ordinary_ancestor);
     RUN_TEST(ws_posix_matching_is_case_sensitive);
+    RUN_TEST(ws_home_identity_native_separator_semantics);
+#ifdef _WIN32
+    RUN_TEST(ws_native_home_sensitive_grant_matches_canonical_backslashes);
+#endif
     RUN_TEST(ws_null_context_disables_dependent_checks);
     RUN_TEST(ws_every_verdict_has_a_reason);
 }

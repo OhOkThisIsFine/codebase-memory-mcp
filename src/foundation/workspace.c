@@ -240,19 +240,53 @@ static bool ws_is_windows_user_programs_tree(const char *path) {
 }
 
 /* True when b is a or lives under a. Compares on a separator boundary so
- * "/a/bc" is not treated as living under "/a/b". */
+ * "/a/bc" is not treated
+ * as living under "/a/b". */
+static bool ws_identity_is_sep(char c, bool windows_style) {
+    return c == '/' || (windows_style && c == '\\');
+}
+
 static bool ws_is_ancestor_or_equal(const char *a, const char *b) {
     if (!a || !b || !a[0] || !b[0]) {
         return false;
     }
+    /* GetFinalPathNameByHandle returns DOS/UNC backslashes, while the shared
+     * HOME resolver
+     * returns forward slashes. Apply native Windows identity
+     * semantics to both forms,
+     * including stored exact-sensitive grants. POSIX
+     * backslashes and case remain literal
+     * filename bytes. */
+#ifdef _WIN32
+    bool windows_style =
+        (ws_is_windows_style(a) && ws_is_windows_style(b)) || (ws_is_unc(a) && ws_is_unc(b));
+#else
+    bool windows_style = false;
+#endif
     size_t la = strlen(a);
-    while (la > 1 && ws_is_sep(a[la - 1])) {
+    while (la > 1 && ws_identity_is_sep(a[la - 1], windows_style)) {
         la--;
     }
-    if (strncmp(a, b, la) != 0) {
-        return false;
+    for (size_t i = 0; i < la; i++) {
+        char ac = a[i], bc = b[i];
+        if (!bc) {
+            return false;
+        }
+        if (windows_style) {
+            if (ws_identity_is_sep(ac, true))
+                ac = '/';
+            if (ws_identity_is_sep(bc, true))
+                bc = '/';
+            if (ac >= 'A' && ac <= 'Z')
+                ac = (char)(ac - 'A' + 'a');
+            if (bc >= 'A' && bc <= 'Z')
+                bc = (char)(bc - 'A' + 'a');
+        }
+        if (ac != bc) {
+            return false;
+        }
     }
-    return b[la] == '\0' || ws_is_sep(b[la]);
+    return b[la] == '\0' || ws_identity_is_sep(b[la], windows_style);
 }
 
 static bool ws_paths_equal(const char *a, const char *b) {
