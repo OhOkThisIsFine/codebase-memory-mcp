@@ -419,6 +419,15 @@ TEST(ws_environment_home_identity_boundaries) {
         failures += cbm_workspace_root_allowed(home, resolved, cache, home, err, sizeof(err));
         failures += cbm_workspace_grant_add(cache, resolved, home, false, err, sizeof(err));
         if (len >= 4096) {
+            failures += !resolved || resolved[0] != '\0';
+            failures +=
+                cbm_workspace_classify_root(cache, resolved, cache) != CBM_WS_DENY_HOME_UNAVAILABLE;
+            failures += cbm_workspace_verdict_is_overridable(CBM_WS_DENY_HOME_UNAVAILABLE);
+            /* Use an existing short path: refusal must come from unreadable
+             * home
+             * identity, not an oversized/nonexistent requested root. */
+            failures += cbm_workspace_root_allowed(cache, resolved, cache, cache, err, sizeof(err));
+            failures += cbm_workspace_grant_add(cache, resolved, cache, true, err, sizeof(err));
             failures += cbm_workspace_grant_add(cache, resolved, home, true, err, sizeof(err));
         }
     }
