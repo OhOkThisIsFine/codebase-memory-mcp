@@ -600,19 +600,29 @@ TEST(subprocess_windows_job_object_cancellation_quiesces_descendant_tree) {
     char powershell_path[MAX_PATH];
     ASSERT_TRUE(snprintf(powershell_path, sizeof(powershell_path),
                          "%s\\WindowsPowerShell\\v1.0\\powershell.exe", system_directory) > 0);
+    const char *powershell_name = cbm_windows_powershell_name();
+    if (strcmp(powershell_name, "pwsh.exe") == 0) {
+        wchar_t modern_path[MAX_PATH];
+        DWORD modern_length = SearchPathW(NULL, L"pwsh.exe", NULL, MAX_PATH, modern_path, NULL);
+        ASSERT_TRUE(modern_length > 0 && modern_length < MAX_PATH);
+        ASSERT_TRUE(WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, modern_path, -1,
+                                        powershell_path, sizeof(powershell_path), NULL, NULL) > 0);
+    }
 
     char script[4096];
-    int script_length = snprintf(
-        script, sizeof(script),
-        "Write-Output 'cbm-test root-started'; $child=Start-Process powershell.exe "
-        "-ArgumentList '-NoProfile','-Command','while ($true) { Start-Sleep -Milliseconds 100 }' "
-        "-WindowStyle Hidden -PassThru; Set-Content -Encoding ASCII -LiteralPath '%s' "
-        "-Value ($PID.ToString() + ' ' + $child.Id.ToString()); "
-        "Write-Output 'cbm-test child-started'; "
-        "while ($true) { Start-Sleep -Milliseconds 100 }",
-        pid_path);
+    int script_length =
+        snprintf(script, sizeof(script),
+                 "Write-Output 'cbm-test root-started'; $child=Start-Process %s "
+                 "-ArgumentList '-NoProfile','-NonInteractive','-Command',"
+                 "'while ($true) { Start-Sleep -Milliseconds 100 }' "
+                 "-WindowStyle Hidden -PassThru; Set-Content -Encoding ASCII -LiteralPath '%s' "
+                 "-Value ($PID.ToString() + ' ' + $child.Id.ToString()); "
+                 "Write-Output 'cbm-test child-started'; "
+                 "while ($true) { Start-Sleep -Milliseconds 100 }",
+                 powershell_name, pid_path);
     ASSERT_TRUE(script_length > 0 && (size_t)script_length < sizeof(script));
-    const char *argv[] = {powershell_path, "-NoProfile", "-Command", script, NULL};
+    const char *argv[] = {powershell_path, "-NoProfile", "-NonInteractive",
+                          "-Command",      script,       NULL};
 
     cbm_proc_opts_t opts = {0};
     opts.bin = powershell_path;

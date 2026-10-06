@@ -85,6 +85,13 @@ static void cbm_canonicalize_drive(char *path) {
 #include <sys/stat.h>
 #include "foundation/win_utf8.h"
 
+const char *cbm_windows_powershell_name(void) {
+    wchar_t path[CBM_SZ_4K];
+    DWORD length =
+        SearchPathW(NULL, L"pwsh.exe", NULL, (DWORD)(sizeof(path) / sizeof(path[0])), path, NULL);
+    return length > 0 && length < sizeof(path) / sizeof(path[0]) ? "pwsh.exe" : "powershell.exe";
+}
+
 void *cbm_mmap_read(const char *path, size_t *out_size) {
     if (!path || !out_size) {
         return NULL;

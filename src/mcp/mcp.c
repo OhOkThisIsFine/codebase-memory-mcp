@@ -9493,12 +9493,13 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
                                     const char *filelist, const char *root_path) {
 #ifdef _WIN32
     const char *sm = use_regex ? "" : " -SimpleMatch";
+    const char *engine = cbm_windows_powershell_name();
     if (scoped) {
         if (file_pattern) {
             if (cbm_search_code_file_pattern_can_prefilter(file_pattern)) {
                 snprintf(
                     cmd, cmd_sz,
-                    "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                    "%s -NoProfile -NonInteractive -Command \"" CBM_PS_UTF8_PRELUDE
                     "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
                     "Get-Content -Encoding UTF8 -LiteralPath '%s'"
                     " | Where-Object { $_ -like '%s' }"
@@ -9506,51 +9507,51 @@ void cbm_search_code_build_grep_cmd(char *cmd, size_t cmd_sz, bool use_regex, bo
                     "-ErrorAction SilentlyContinue }"
                     " | Where-Object { $_.Path -like '*%s' }"
                     " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
-                    tmpfile, filelist, file_pattern, sm, file_pattern);
+                    engine, tmpfile, filelist, file_pattern, sm, file_pattern);
             } else {
                 snprintf(
                     cmd, cmd_sz,
-                    "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                    "%s -NoProfile -NonInteractive -Command \"" CBM_PS_UTF8_PRELUDE
                     "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
                     "Get-Content -Encoding UTF8 -LiteralPath '%s' | ForEach-Object { Select-String "
                     "-LiteralPath $_ -Pattern $pat%s "
                     "-ErrorAction SilentlyContinue }"
                     " | Where-Object { $_.Path -like '*%s' }"
                     " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
-                    tmpfile, filelist, sm, file_pattern);
+                    engine, tmpfile, filelist, sm, file_pattern);
             }
         } else {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                "%s -NoProfile -NonInteractive -Command \"" CBM_PS_UTF8_PRELUDE
                 "$pat = Get-Content -Encoding UTF8 -LiteralPath '%s'; "
                 "Get-Content -Encoding UTF8 -LiteralPath '%s' | ForEach-Object { Select-String "
                 "-LiteralPath $_ -Pattern $pat%s "
                 "-ErrorAction SilentlyContinue }"
                 " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
-                tmpfile, filelist, sm);
+                engine, tmpfile, filelist, sm);
         }
     } else {
         if (file_pattern) {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                "%s -NoProfile -NonInteractive -Command \"" CBM_PS_UTF8_PRELUDE
                 "Get-ChildItem -Recurse -Path '%s\\*' -Include '%s' -File "
                 "-ErrorAction SilentlyContinue"
                 " | Select-String -Pattern (Get-Content -Encoding UTF8 -LiteralPath '%s')%s "
                 "-ErrorAction SilentlyContinue"
                 " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
-                root_path, file_pattern, tmpfile, sm);
+                engine, root_path, file_pattern, tmpfile, sm);
         } else {
             snprintf(
                 cmd, cmd_sz,
-                "powershell -Command \"" CBM_PS_UTF8_PRELUDE
+                "%s -NoProfile -NonInteractive -Command \"" CBM_PS_UTF8_PRELUDE
                 "Get-ChildItem -Recurse -Path '%s\\*' -File -ErrorAction "
                 "SilentlyContinue"
                 " | Select-String -Pattern (Get-Content -Encoding UTF8 -LiteralPath '%s')%s "
                 "-ErrorAction SilentlyContinue"
                 " | ForEach-Object { $_.Path + [char]9 + $_.LineNumber + [char]9 + $_.Line }\"",
-                root_path, tmpfile, sm);
+                engine, root_path, tmpfile, sm);
         }
     }
 #else

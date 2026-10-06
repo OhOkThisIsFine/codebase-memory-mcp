@@ -114,6 +114,13 @@ cbm_system_info_t cbm_system_info(void);
  * initial=false: max(1, perf_cores-1) (leave headroom for user apps) */
 int cbm_default_worker_count(bool initial);
 
+#ifdef _WIN32
+/* Prefer available PowerShell 7 for bounded automated scans. Windows
+ * PowerShell remains the
+ * fallback when pwsh.exe is unavailable on PATH. */
+const char *cbm_windows_powershell_name(void);
+#endif
+
 /* ── Environment variables ──────────────────────────────────────── */
 
 /* Thread-safe getenv: copies the value into a caller-provided buffer.

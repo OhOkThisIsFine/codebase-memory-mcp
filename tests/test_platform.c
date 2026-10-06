@@ -39,6 +39,40 @@ enum { PLATFORM_MKDTEMP_THREADS = 8, PLATFORM_MKDTEMP_ITERATIONS = 32 };
 #include <stdio.h>
 #include <string.h>
 
+#ifdef _WIN32
+TEST(platform_windows_powershell_preference_and_fallback) {
+    char fixture[CBM_SZ_4K];
+    snprintf(fixture, sizeof(fixture), "%s/cbm-powershell-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(fixture));
+    wchar_t *wide_fixture = cbm_utf8_to_wide(fixture);
+    ASSERT_NOT_NULL(wide_fixture);
+    SetLastError(ERROR_SUCCESS);
+    DWORD saved_size = GetEnvironmentVariableW(L"PATH", NULL, 0);
+    bool present = saved_size > 0 || GetLastError() != ERROR_ENVVAR_NOT_FOUND;
+    wchar_t *saved = calloc(saved_size > 0 ? saved_size : 1, sizeof(*saved));
+    ASSERT_NOT_NULL(saved);
+    if (saved_size > 0) {
+        ASSERT_TRUE(GetEnvironmentVariableW(L"PATH", saved, saved_size) > 0);
+    }
+    bool changed = SetEnvironmentVariableW(L"PATH", wide_fixture) != 0;
+    bool fallback = changed && strcmp(cbm_windows_powershell_name(), "powershell.exe") == 0;
+    char executable[CBM_SZ_4K];
+    int joined = snprintf(executable, sizeof(executable), "%s/pwsh.exe", fixture);
+    bool written = joined > 0 && (size_t)joined < sizeof(executable) &&
+                   th_write_file(executable, "fixture availability only; never executed") == 0;
+    bool modern = changed && written && strcmp(cbm_windows_powershell_name(), "pwsh.exe") == 0;
+    bool restored = SetEnvironmentVariableW(L"PATH", present ? saved : NULL) != 0;
+    free(saved);
+    free(wide_fixture);
+    (void)cbm_unlink(executable);
+    (void)cbm_rmdir(fixture);
+    ASSERT_TRUE(changed && restored);
+    ASSERT_TRUE(fallback);
+    ASSERT_TRUE(modern);
+    PASS();
+}
+#endif
+
 /* Worker staging files land under CBM_CACHE_DIR, which users may place at
  * non-ASCII paths. On Windows the templates must round-trip through the wide
  * APIs; the ANSI CRT (_mktemp/_open) mangles UTF-8 bytes and fails. */
@@ -1130,6 +1164,7 @@ SUITE(platform) {
     RUN_TEST(platform_cache_dir_is_absolute_for_accepted_home);
     RUN_TEST(platform_cache_dir_from_non_home_cwd_never_contains_token);
 #ifdef _WIN32
+    RUN_TEST(platform_windows_powershell_preference_and_fallback);
     RUN_TEST(platform_setenv_preserves_utf8_in_wide_environment);
     RUN_TEST(platform_windows_empty_environment_is_read_and_unset_idempotently);
 #endif
