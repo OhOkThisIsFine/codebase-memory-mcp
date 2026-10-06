@@ -16,6 +16,7 @@
 #include "test_framework.h"
 #include "repro_harness.h" /* RProj, rh_index_files, rh_count_label, rh_cleanup */
 #include "foundation/log.h"
+#include "foundation/platform.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -122,7 +123,9 @@ TEST(index_format_siblings_distinct_and_searchable) {
              "{\"project\":\"%s\",\"pattern\":\"repro-marker\",\"mode\":\"files\"}", lp.project);
     char *saved_dup = getenv("CBM_CACHE_DIR") ? strdup(getenv("CBM_CACHE_DIR")) : NULL;
     cbm_setenv("CBM_CACHE_DIR", lp.cachedir, 1);
+    uint64_t search_started_ms = cbm_now_ms();
     char *resp = cbm_mcp_handle_tool(lp.srv, "search_code", args);
+    uint64_t search_elapsed_ms = cbm_now_ms() - search_started_ms;
     if (saved_dup) {
         cbm_setenv("CBM_CACHE_DIR", saved_dup, 1);
         free(saved_dup);
@@ -132,7 +135,26 @@ TEST(index_format_siblings_distinct_and_searchable) {
     ASSERT_NOT_NULL(resp);
     for (int i = 0; i < k_nfiles; i++) {
         if (!strstr(resp, k_files[i].name)) {
+            /* Keep the real error/result visible before releasing it. This
+             * request only searches the owned four-file fixture. Escape log
+             * control bytes and bound output without changing the assertion
+             * or the production scan budget. */
+            size_t response_len = strlen(resp);
+            fprintf(stderr,
+                    "index_format search missing=%s elapsed_ms=%llu response_bytes=%zu response=",
+                    k_files[i].name, (unsigned long long)search_elapsed_ms, response_len);
+            enum { RESPONSE_DIAGNOSTIC_LIMIT = 4096 };
+            for (size_t j = 0; j < response_len && j < RESPONSE_DIAGNOSTIC_LIMIT; j++) {
+                unsigned char byte = (unsigned char)resp[j];
+                if (byte < 0x20 || byte == 0x7f) {
+                    fprintf(stderr, "\\x%02x", byte);
+                } else {
+                    fputc(byte, stderr);
+                }
+            }
+            fprintf(stderr, "%s\n", response_len > RESPONSE_DIAGNOSTIC_LIMIT ? " [truncated]" : "");
             free(resp);
+            rh_cleanup(&lp, store);
             FAIL("search_code did not reach an indexed sibling");
         }
     }

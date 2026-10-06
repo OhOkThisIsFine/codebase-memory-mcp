@@ -5540,8 +5540,11 @@ TEST(search_code_scoped_scan_skips_non_regular_indexed_paths) {
  * mojibake on CI). Every builder variant must carry the prelude. */
 TEST(search_code_windows_scan_pins_utf8_output) {
 #ifdef _WIN32
-    static const char prelude[] =
-        "powershell -Command \"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ";
+    char prelude[256];
+    snprintf(prelude, sizeof(prelude),
+             "%s -NoProfile -NonInteractive -Command "
+             "\"[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; ",
+             cbm_windows_powershell_name());
     char command[CBM_SZ_4K];
     struct {
         bool scoped;
@@ -5555,7 +5558,7 @@ TEST(search_code_windows_scan_pins_utf8_output) {
         cbm_search_code_build_grep_cmd(command, sizeof(command), false, cases[i].scoped,
                                        cases[i].file_pattern, "C:/tmp/pattern", "C:/tmp/filelist",
                                        "C:/tmp/root");
-        ASSERT_TRUE(strncmp(command, prelude, sizeof(prelude) - 1) == 0);
+        ASSERT_TRUE(strncmp(command, prelude, strlen(prelude)) == 0);
     }
     PASS();
 #else

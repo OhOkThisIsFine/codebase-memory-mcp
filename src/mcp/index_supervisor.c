@@ -517,31 +517,14 @@ static void worker_result_init(cbm_index_worker_result_t *result) {
     result->exit_code = -1;
 }
 
-/* Resolve into caller-owned storage. The generic resolver returns a shared
- * static buffer, which is unsuitable for concurrent daemon starts. */
+/* Retain caller-owned storage after resolving the complete native identity. */
 static bool worker_cache_dir(char out[INDEX_WORKER_PATH_CAP]) {
-    char configured[INDEX_WORKER_PATH_CAP] = {0};
-    if (cbm_safe_getenv("CBM_CACHE_DIR", configured, sizeof(configured), NULL) && configured[0]) {
-        int written = snprintf(out, INDEX_WORKER_PATH_CAP, "%s", configured);
-        if (written <= 0 || written >= INDEX_WORKER_PATH_CAP) {
-            return false;
-        }
-        cbm_normalize_path_sep(out);
-        return true;
-    }
-    char home[INDEX_WORKER_PATH_CAP] = {0};
-    if (!cbm_safe_getenv("HOME", home, sizeof(home), NULL) || !home[0]) {
-        (void)cbm_safe_getenv("USERPROFILE", home, sizeof(home), NULL);
-    }
-    if (!home[0]) {
+    const char *resolved = cbm_resolve_cache_dir();
+    if (!resolved || !resolved[0]) {
         return false;
     }
-    int written = snprintf(out, INDEX_WORKER_PATH_CAP, "%s/.cache/codebase-memory-mcp", home);
-    if (written <= 0 || written >= INDEX_WORKER_PATH_CAP) {
-        return false;
-    }
-    cbm_normalize_path_sep(out);
-    return true;
+    int written = snprintf(out, INDEX_WORKER_PATH_CAP, "%s", resolved);
+    return written > 0 && written < INDEX_WORKER_PATH_CAP;
 }
 
 static bool worker_unique_file(char *out, size_t out_size, const char *kind) {

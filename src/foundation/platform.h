@@ -114,6 +114,13 @@ cbm_system_info_t cbm_system_info(void);
  * initial=false: max(1, perf_cores-1) (leave headroom for user apps) */
 int cbm_default_worker_count(bool initial);
 
+#ifdef _WIN32
+/* Prefer available PowerShell 7 for bounded automated scans. Windows
+ * PowerShell remains the
+ * fallback when pwsh.exe is unavailable on PATH. */
+const char *cbm_windows_powershell_name(void);
+#endif
+
 /* ── Environment variables ──────────────────────────────────────── */
 
 /* Thread-safe getenv: copies the value into a caller-provided buffer.
@@ -124,8 +131,18 @@ const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const ch
 /* ── Home directory ─────────────────────────────────────────────── */
 
 /* Cross-platform home directory: tries HOME first, then USERPROFILE (Windows).
- * Returns NULL when neither is set. */
+ * Returns NULL when neither is set, or when the only values present are
+ * unusable — relative, or an unexpanded "%USERPROFILE%"/"~" token. */
 const char *cbm_get_home_dir(void);
+
+/* Same resolver; distinguishes absence/unusable syntax from a failed read or
+ * a value outside the 4096-byte product bound. read_failed must be non-NULL. */
+const char *cbm_get_home_dir_checked(bool *read_failed);
+
+/* Whether an environment value can serve as a home directory: absolute, and
+ * not a literal unexpanded "%VAR%" / "~" token. Shared with the callers that
+ * read HOME/USERPROFILE directly, so every classifier agrees. */
+bool cbm_home_dir_value_usable(const char *value);
 
 /* ── App config directories ────────────────────────────────────── */
 

@@ -21,6 +21,10 @@ concurrency:
 
 jobs:
   security:
+    permissions:
+      contents: read
+      actions: read
+      security-events: read
     uses: ./.github/workflows/_security.yml
     secrets: inherit
 

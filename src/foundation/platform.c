@@ -85,6 +85,23 @@ static void cbm_canonicalize_drive(char *path) {
 #include <sys/stat.h>
 #include "foundation/win_utf8.h"
 
+const char *cbm_windows_powershell_name(void) {
+    /* Match cmd.exe's PATH lookup rather than this application's directory. */
+    DWORD capacity = GetEnvironmentVariableW(L"PATH", NULL, 0);
+    wchar_t *directories = capacity > 0 ? calloc(capacity, sizeof(*directories)) : NULL;
+    if (!directories) {
+        return "powershell.exe";
+    }
+    DWORD read = GetEnvironmentVariableW(L"PATH", directories, capacity);
+    wchar_t path[CBM_SZ_4K];
+    DWORD length = read > 0 && read < capacity
+                       ? SearchPathW(directories, L"pwsh.exe", NULL,
+                                     (DWORD)(sizeof(path) / sizeof(path[0])), path, NULL)
+                       : 0;
+    free(directories);
+    return length > 0 && length < sizeof(path) / sizeof(path[0]) ? "pwsh.exe" : "powershell.exe";
+}
+
 void *cbm_mmap_read(const char *path, size_t *out_size) {
     if (!path || !out_size) {
         return NULL;
@@ -393,6 +410,9 @@ const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const ch
                 if (environment_error == ERROR_ENVVAR_NOT_FOUND) {
                     return fallback ? platform_copy_environment_value(buf, buf_sz, fallback) : NULL;
                 }
+                if (environment_error != ERROR_SUCCESS) {
+                    return NULL;
+                }
                 /* An existing empty variable is distinct from a missing one. */
                 return buf;
             }
@@ -437,76 +457,121 @@ const char *cbm_safe_getenv(const char *name, char *buf, size_t buf_sz, const ch
 
 /* ── Home directory (cross-platform) ───────────────────── */
 
-const char *cbm_get_home_dir(void) {
-    static CBM_TLS char buf[CBM_SZ_1K];
-    char tmp[CBM_SZ_256] = "";
-
-    cbm_safe_getenv("HOME", tmp, sizeof(tmp), NULL);
-    if (tmp[0]) {
-        snprintf(buf, sizeof(buf), "%s", tmp);
-        cbm_normalize_path_sep(buf);
-        return buf;
+/* A usable home directory is an ABSOLUTE path. Two shapes are rejected:
+ *
+ *  - a relative value ("foo", "./foo"), and
+ *  - an UNEXPANDED Windows-style token ("%USERPROFILE%", "~", "%HOMEDRIVE%%HOMEPATH%").
+ *
+ * Both are accepted verbatim by the environment lookup, and both are then
+ * joined into ".../.cache/codebase-memory-mcp". Because the joined path is
+ * relative, the daemon's cbm_mkdir_p() resolves it against the process's
+ * current working directory, silently materializing a literal "%USERPROFILE%"
+ * directory next to whatever cwd the launching hook happened to have
+ * (observed under ~/.claude/hooks and ~/.agent-config). Treating such a value
+ * as "unset" makes callers fall through to the real variable or fail loudly
+ * instead of writing a stray cache tree. */
+bool cbm_home_dir_value_usable(const char *value) {
+    if (!value || !value[0] || value[0] == '%' || value[0] == '~') {
+        return false;
     }
+#ifdef _WIN32
+    bool drive_letter =
+        (value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z');
+    if (drive_letter && value[1] == ':' && (value[2] == '/' || value[2] == '\\')) {
+        return true;
+    }
+    /* UNC requires both a server and share. Root-relative paths depend on
+     * the current drive. Device namespaces are not home identities. */
+    if (!((value[0] == '/' && value[1] == '/') || (value[0] == '\\' && value[1] == '\\'))) {
+        return false;
+    }
+    const char *server = value + 2;
+    if (!server[0] || server[0] == '/' || server[0] == '\\' || server[0] == '?' ||
+        server[0] == '.') {
+        return false;
+    }
+    const char *share = server;
+    while (*share && *share != '/' && *share != '\\')
+        share++;
+    if (!*share)
+        return false;
+    share++;
+    const char *end = share;
+    while (*end && *end != '/' && *end != '\\')
+        end++;
+    size_t length = (size_t)(end - share);
+    return length > 0 && !(length == 1 && share[0] == '.') &&
+           !(length == 2 && share[0] == '.' && share[1] == '.');
+#else
+    return value[0] == '/';
+#endif
+}
 
-    cbm_safe_getenv("USERPROFILE", tmp, sizeof(tmp), NULL);
-    if (tmp[0]) {
-        snprintf(buf, sizeof(buf), "%s", tmp);
-        cbm_normalize_path_sep(buf);
-        return buf;
+const char *cbm_get_home_dir_checked(bool *read_failed) {
+    static CBM_TLS char buf[CBM_SZ_4K];
+    const char *names[] = {"HOME", "USERPROFILE"};
+    *read_failed = false;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        /* Empty fallback distinguishes absence from overflow/read failure.
+         * A failed higher-priority read must not select a different identity. */
+        if (!cbm_safe_getenv(names[i], buf, sizeof(buf), "")) {
+            *read_failed = true;
+            return NULL;
+        }
+        if (cbm_home_dir_value_usable(buf)) {
+#ifdef _WIN32
+            cbm_normalize_path_sep(buf);
+#endif
+            return buf;
+        }
     }
     return NULL;
 }
 
+const char *cbm_get_home_dir(void) {
+    bool read_failed;
+    return cbm_get_home_dir_checked(&read_failed);
+}
+
 /* ── App config directories (cross-platform) ────────── */
 
-const char *cbm_app_config_dir(void) {
-    static CBM_TLS char buf[CBM_SZ_1K];
-    char tmp[CBM_SZ_256] = "";
+static const char *platform_app_dir(const char *variable, const char *suffix, char *buf,
+                                    size_t size) {
+    if (!cbm_safe_getenv(variable, buf, size, "")) {
+        return NULL;
+    }
+    if (buf[0]) {
 #ifdef _WIN32
-    cbm_safe_getenv("APPDATA", tmp, sizeof(tmp), NULL);
-    if (tmp[0]) {
-        snprintf(buf, sizeof(buf), "%s", tmp);
         cbm_normalize_path_sep(buf);
+#endif
         return buf;
     }
     const char *home = cbm_get_home_dir();
-    if (home) {
-        snprintf(buf, sizeof(buf), "%s/AppData/Roaming", home);
-        return buf;
+    if (!home) {
+        return NULL;
     }
-    return NULL;
+    int written = snprintf(buf, size, "%s%s", home, suffix);
+    if (written <= 0 || (size_t)written >= size) {
+        buf[0] = '\0';
+        return NULL;
+    }
+    return buf;
+}
+
+const char *cbm_app_config_dir(void) {
+    static CBM_TLS char buf[CBM_SZ_4K];
+#ifdef _WIN32
+    return platform_app_dir("APPDATA", "/AppData/Roaming", buf, sizeof(buf));
 #else
     /* Linux: XDG_CONFIG_HOME or ~/.config */
-    cbm_safe_getenv("XDG_CONFIG_HOME", tmp, sizeof(tmp), NULL);
-    if (tmp[0]) {
-        snprintf(buf, sizeof(buf), "%s", tmp);
-        return buf;
-    }
-    const char *home = cbm_get_home_dir();
-    if (home) {
-        snprintf(buf, sizeof(buf), "%s/.config", home);
-        return buf;
-    }
-    return NULL;
+    return platform_app_dir("XDG_CONFIG_HOME", "/.config", buf, sizeof(buf));
 #endif /* _WIN32 */
 }
 
 const char *cbm_app_local_dir(void) {
 #ifdef _WIN32
-    static CBM_TLS char buf[CBM_SZ_1K];
-    char tmp[CBM_SZ_256] = "";
-    cbm_safe_getenv("LOCALAPPDATA", tmp, sizeof(tmp), NULL);
-    if (tmp[0]) {
-        snprintf(buf, sizeof(buf), "%s", tmp);
-        cbm_normalize_path_sep(buf);
-        return buf;
-    }
-    const char *home = cbm_get_home_dir();
-    if (home) {
-        snprintf(buf, sizeof(buf), "%s/AppData/Local", home);
-        return buf;
-    }
-    return NULL;
+    static CBM_TLS char buf[CBM_SZ_4K];
+    return platform_app_dir("LOCALAPPDATA", "/AppData/Local", buf, sizeof(buf));
 #else
     return cbm_app_config_dir();
 #endif
@@ -525,7 +590,9 @@ const char *cbm_resolve_cache_dir(void) {
         return NULL;
     }
     if (strcmp(configured, missing) != 0 && configured[0]) {
+#ifdef _WIN32
         cbm_normalize_path_sep(buf);
+#endif
         return buf;
     }
     const char *home = cbm_get_home_dir();

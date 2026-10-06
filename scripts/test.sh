@@ -272,6 +272,9 @@ bash "$ROOT/tests/test_language_count_contract.sh"
 echo "=== Step 0x: packaging version-metadata contract ==="
 bash "$ROOT/tests/test_version_metadata_contract.sh"
 
+echo "=== Step 0y: CodeQL gate fails closed on missing or unreadable evidence ==="
+python3 "$ROOT/tests/test_codeql_gate.py"
+
 # Verify compiler supports target arch
 verify_compiler "$CC"
 
@@ -345,6 +348,9 @@ CBM_TEST_BINARY="$WATCHDOG_BINARY" bash "$ROOT/tests/test_worker_error_response.
 # never a fixed sleep — see the header of the test for why.
 echo "=== Step 5e: watcher_enabled kill-switch regression (#335) ==="
 CBM_TEST_BINARY="$WATCHDOG_BINARY" bash "$ROOT/tests/test_watcher_disabled.sh"
+
+echo "=== Step 5f: native HOME cache identity regression ==="
+CBM_TEST_BINARY="$WATCHDOG_BINARY" bash "$ROOT/tests/test_native_home_cache_identity.sh"
 
 # Step 6: security-strings URL allow-list regression. The MSYS2 CLANG64 toolchain
 # bakes its package-tracker URL into the static Windows .exe; the binary string

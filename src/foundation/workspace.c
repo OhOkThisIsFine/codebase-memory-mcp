@@ -240,19 +240,53 @@ static bool ws_is_windows_user_programs_tree(const char *path) {
 }
 
 /* True when b is a or lives under a. Compares on a separator boundary so
- * "/a/bc" is not treated as living under "/a/b". */
+ * "/a/bc" is not treated
+ * as living under "/a/b". */
+static bool ws_identity_is_sep(char c, bool windows_style) {
+    return c == '/' || (windows_style && c == '\\');
+}
+
 static bool ws_is_ancestor_or_equal(const char *a, const char *b) {
     if (!a || !b || !a[0] || !b[0]) {
         return false;
     }
+    /* GetFinalPathNameByHandle returns DOS/UNC backslashes, while the shared
+     * HOME resolver
+     * returns forward slashes. Apply native Windows identity
+     * semantics to both forms,
+     * including stored exact-sensitive grants. POSIX
+     * backslashes and case remain literal
+     * filename bytes. */
+#ifdef _WIN32
+    bool windows_style =
+        (ws_is_windows_style(a) && ws_is_windows_style(b)) || (ws_is_unc(a) && ws_is_unc(b));
+#else
+    bool windows_style = false;
+#endif
     size_t la = strlen(a);
-    while (la > 1 && ws_is_sep(a[la - 1])) {
+    while (la > 1 && ws_identity_is_sep(a[la - 1], windows_style)) {
         la--;
     }
-    if (strncmp(a, b, la) != 0) {
-        return false;
+    for (size_t i = 0; i < la; i++) {
+        char ac = a[i], bc = b[i];
+        if (!bc) {
+            return false;
+        }
+        if (windows_style) {
+            if (ws_identity_is_sep(ac, true))
+                ac = '/';
+            if (ws_identity_is_sep(bc, true))
+                bc = '/';
+            if (ac >= 'A' && ac <= 'Z')
+                ac = (char)(ac - 'A' + 'a');
+            if (bc >= 'A' && bc <= 'Z')
+                bc = (char)(bc - 'A' + 'a');
+        }
+        if (ac != bc) {
+            return false;
+        }
     }
-    return b[la] == '\0' || ws_is_sep(b[la]);
+    return b[la] == '\0' || ws_identity_is_sep(b[la], windows_style);
 }
 
 static bool ws_paths_equal(const char *a, const char *b) {
@@ -261,6 +295,9 @@ static bool ws_paths_equal(const char *a, const char *b) {
 
 cbm_ws_verdict_t cbm_workspace_classify_root(const char *canonical_path, const char *home_dir,
                                              const char *cache_dir) {
+    if (home_dir && !home_dir[0]) {
+        return CBM_WS_DENY_HOME_UNAVAILABLE;
+    }
     if (!canonical_path || !canonical_path[0] || ws_volume_prefix_len(canonical_path) == 0) {
         /* A relative or empty path is not a usable root; refuse it the same way
          * as a volume root rather than letting it fall through as allowed. */
@@ -349,6 +386,9 @@ const char *cbm_workspace_verdict_reason(cbm_ws_verdict_t verdict) {
         return "path is a volume root or holds the codebase-memory cache; it cannot be indexed";
     case CBM_WS_DENY_SENSITIVE:
         return "path is a home, credential, system, or application-install directory";
+    case CBM_WS_DENY_HOME_UNAVAILABLE:
+        return "home identity could not be read completely; correct HOME/USERPROFILE before "
+               "indexing";
     default:
         break;
     }
@@ -602,12 +642,12 @@ bool cbm_workspace_root_allowed(const char *canonical_path, const char *home_dir
 /* Callers should not each re-derive these; a caller that resolved the home
  * directory differently would classify the same path differently. */
 const char *cbm_workspace_home_dir(void) {
-    const char *home = getenv("HOME");
-    if (home && home[0]) {
-        return home;
-    }
-    home = getenv("USERPROFILE");
-    return (home && home[0]) ? home : NULL;
+    /* Delegate to the shared resolver so this classifier cannot disagree with
+     * cbm_resolve_cache_dir(), and so an unexpanded "%USERPROFILE%" HOME is
+     * rejected rather than treated as a relative path rooted at the cwd. */
+    bool read_failed;
+    const char *home = cbm_get_home_dir_checked(&read_failed);
+    return read_failed ? "" : home;
 }
 
 const char *cbm_workspace_cache_dir(void) {

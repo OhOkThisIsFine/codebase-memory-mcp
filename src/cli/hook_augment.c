@@ -20,6 +20,7 @@
 #include "foundation/compat_fs.h"
 #include "foundation/constants.h"
 #include "foundation/mem.h"
+#include "foundation/platform.h"
 #include "mcp/mcp.h"
 #include "pipeline/pipeline.h"
 #include "yyjson/yyjson.h"
@@ -103,7 +104,10 @@ static void ha_open_crumb_log(int deadline_ms) {
     if (override && override[0]) {
         snprintf(path, sizeof(path), "%s", override);
     } else {
-        const char *home = getenv("HOME");
+        /* Shared resolver: a raw HOME holding an unexpanded "%USERPROFILE%"
+         * token would make this a cwd-relative path and drop the crumb log
+         * beside whatever directory the hook was launched from. */
+        const char *home = cbm_get_home_dir();
         if (!home || !home[0]) {
             return;
         }

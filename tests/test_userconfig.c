@@ -222,7 +222,112 @@ TEST(userconfig_free_null) {
 
 /* ── Suite ──────────────────────────────────────────────────────── */
 
+/* Complete application and project directories can exceed 1280 bytes. */
+TEST(userconfig_long_global_and_project_paths) {
+#if defined(_WIN32) || defined(__APPLE__)
+    SKIP_PLATFORM(
+        "3000-byte filesystem paths exceed macOS limits or require Windows long-path support");
+#else
+    char base[4096];
+    snprintf(base, sizeof(base), "%s/uctest_long_paths", cbm_tmpdir());
+    while (strlen(base) < 3000) {
+        size_t remaining = 3000 - strlen(base);
+        size_t component = remaining > 61 ? 60 : remaining - 1;
+        if (remaining == 62) {
+            component = 59;
+        }
+        size_t offset = strlen(base);
+        base[offset++] = '/';
+        memset(base + offset, 'h', component);
+        base[offset + component] = '\0';
+    }
+    ASSERT(cbm_mkdir_p(base, 0755));
+    char app_dir[4096];
+    char global_path[4096];
+    char project_path[4096];
+    snprintf(app_dir, sizeof(app_dir), "%s/codebase-memory-mcp", base);
+    ASSERT(cbm_mkdir_p(app_dir, 0755));
+    snprintf(global_path, sizeof(global_path), "%s/config.json", app_dir);
+    snprintf(project_path, sizeof(project_path), "%s/.codebase-memory.json", base);
+    ASSERT_EQ(write_json(global_path, "{\"extra_extensions\":{\".twig\":\"html\"}}"), 0);
+    ASSERT_EQ(write_json(project_path, "{\"extra_extensions\":{\".blade.php\":\"php\"}}"), 0);
+    const char *previous = getenv("XDG_CONFIG_HOME");
+    char *saved = previous ? strdup(previous) : NULL;
+    cbm_setenv("XDG_CONFIG_HOME", base, 1);
+    cbm_userconfig_t *cfg = cbm_userconfig_load(base);
+    if (saved) {
+        cbm_setenv("XDG_CONFIG_HOME", saved, 1);
+    } else {
+        cbm_unsetenv("XDG_CONFIG_HOME");
+    }
+    free(saved);
+    remove(global_path);
+    remove(project_path);
+    ASSERT_NOT_NULL(cfg);
+    ASSERT_EQ(cbm_userconfig_lookup(cfg, ".twig"), CBM_LANG_HTML);
+    ASSERT_EQ(cbm_userconfig_lookup(cfg, ".blade.php"), CBM_LANG_PHP);
+    cbm_userconfig_free(cfg);
+    char home_app_dir[4096];
+    char home_config[4096];
+    snprintf(home_app_dir, sizeof(home_app_dir), "%s/.config/codebase-memory-mcp", base);
+    ASSERT(cbm_mkdir_p(home_app_dir, 0755));
+    snprintf(home_config, sizeof(home_config), "%s/config.json", home_app_dir);
+    ASSERT_EQ(write_json(home_config, "{\"extra_extensions\":{\".twig\":\"html\"}}"), 0);
+    previous = getenv("HOME");
+    char *saved_home = previous ? strdup(previous) : NULL;
+    previous = getenv("XDG_CONFIG_HOME");
+    saved = previous ? strdup(previous) : NULL;
+    cbm_setenv("HOME", base, 1);
+    cbm_unsetenv("XDG_CONFIG_HOME");
+    cfg = cbm_userconfig_load(NULL);
+    if (saved_home) {
+        cbm_setenv("HOME", saved_home, 1);
+    } else {
+        cbm_unsetenv("HOME");
+    }
+    if (saved) {
+        cbm_setenv("XDG_CONFIG_HOME", saved, 1);
+    } else {
+        cbm_unsetenv("XDG_CONFIG_HOME");
+    }
+    free(saved_home);
+    free(saved);
+    remove(home_config);
+    ASSERT_NOT_NULL(cfg);
+    ASSERT_EQ(cbm_userconfig_lookup(cfg, ".twig"), CBM_LANG_HTML);
+    cbm_userconfig_free(cfg);
+    PASS();
+#endif
+}
+
+TEST(userconfig_unavailable_global_directory_fails_closed) {
+#ifdef _WIN32
+    const char *variable = "APPDATA";
+#else
+    const char *variable = "XDG_CONFIG_HOME";
+#endif
+    const char *previous = getenv(variable);
+    char *saved = previous ? strdup(previous) : NULL;
+    char oversized[4097];
+    memset(oversized, 'x', sizeof(oversized) - 1);
+    oversized[sizeof(oversized) - 1] = '\0';
+    cbm_setenv(variable, oversized, 1);
+    cbm_userconfig_t *cfg = cbm_userconfig_load(NULL);
+    if (saved) {
+        cbm_setenv(variable, saved, 1);
+    } else {
+        cbm_unsetenv(variable);
+    }
+    free(saved);
+    bool rejected = cfg == NULL;
+    cbm_userconfig_free(cfg);
+    ASSERT(rejected);
+    PASS();
+}
+
 SUITE(userconfig) {
+    RUN_TEST(userconfig_long_global_and_project_paths);
+    RUN_TEST(userconfig_unavailable_global_directory_fails_closed);
     RUN_TEST(userconfig_project_basic);
     RUN_TEST(userconfig_global_via_env);
     RUN_TEST(userconfig_project_wins_over_global);
