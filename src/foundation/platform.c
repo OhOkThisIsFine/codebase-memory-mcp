@@ -86,9 +86,19 @@ static void cbm_canonicalize_drive(char *path) {
 #include "foundation/win_utf8.h"
 
 const char *cbm_windows_powershell_name(void) {
+    /* Match cmd.exe's PATH lookup rather than this application's directory. */
+    DWORD capacity = GetEnvironmentVariableW(L"PATH", NULL, 0);
+    wchar_t *directories = capacity > 0 ? calloc(capacity, sizeof(*directories)) : NULL;
+    if (!directories) {
+        return "powershell.exe";
+    }
+    DWORD read = GetEnvironmentVariableW(L"PATH", directories, capacity);
     wchar_t path[CBM_SZ_4K];
-    DWORD length =
-        SearchPathW(NULL, L"pwsh.exe", NULL, (DWORD)(sizeof(path) / sizeof(path[0])), path, NULL);
+    DWORD length = read > 0 && read < capacity
+                       ? SearchPathW(directories, L"pwsh.exe", NULL,
+                                     (DWORD)(sizeof(path) / sizeof(path[0])), path, NULL)
+                       : 0;
+    free(directories);
     return length > 0 && length < sizeof(path) / sizeof(path[0]) ? "pwsh.exe" : "powershell.exe";
 }
 
